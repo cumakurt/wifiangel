@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 WiFiAngel - Wireless Network Security Analysis Tool
-Copyright (C) 2024 Cuma Kurt
+Copyright (C) 2025 Cuma Kurt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
