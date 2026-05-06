@@ -1,214 +1,104 @@
-# WiFiAngel - Wireless Network Security Analysis Tool
+# WiFiAngel
 
-<p align="center">
-  <img src="banner.png" alt="WiFiAngel Banner" width="600"/>
-</p>
+WiFiAngel is an interactive terminal application for **authorized** wireless security assessments on Linux. It combines a Rich-based TUI with common Wi-Fi tooling (aircrack-ng, hcxdumptool, hashcat, hostapd, dnsmasq, and others) to scan networks, capture material for offline analysis, and run controlled lab-style scenarios.
 
-<div align="center">
+**Use only on networks and equipment you own or have explicit written permission to test.** Unauthorized access to communications systems is illegal in most jurisdictions.
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
-[![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](https://www.linux.org/)
-[![Kali Linux](https://img.shields.io/badge/kali-linux-black.svg)](https://www.kali.org/)
+## Requirements
 
-</div>
+- **OS:** Linux with a visible wireless interface (not WSL without USB passthrough; virtual machines need the adapter passed through).
+- **Privileges:** root (`sudo`).
+- **Python:** 3.8 or newer recommended.
 
-[🇹🇷 Türkçe Dokümantasyon için tıklayın](#türkçe-dokümantasyon)
+### Python dependencies
 
-## 🌟 Features
-
-- 📡 **Network Discovery & Monitoring**
-  - Real-time network scanning
-  - Hidden SSID discovery
-  - Client detection and tracking
-  - Signal strength analysis
-
-- 🔒 **Security Analysis**
-  - WPA/WPA2/WPA3 handshake capture
-  - PMKID attack support
-  - Dictionary attack capabilities
-  - Evil Twin attack framework
-  - Man-in-the-Middle (MITM) attack 
-
-- 🛠️ **Advanced Tools**
-  - Channel optimization
-  - MAC address spoofing
-  - Network speed testing
-  - Bluetooth & IoT device scanning
-  - Traffic analysis
-
-- 📊 **Reporting & Analysis**
-  - Detailed attack logs
-  - Network statistics
-  - Client analysis
-  - Security audit reports
-  - HTML and text report generation
-
-## 📸 Screenshots
-
-<p align="center">
-  <img src="images/1.png" alt="Network Discovery" width="300"/>
-  <img src="images/2.png" alt="Attack Interface" width="300"/>
-  <img src="images/3.png" alt="Results Analysis" width="300"/>
-</p>
-
-## 🚀 Installation
-
-1. Clone the repository:
 ```bash
-git clone https://github.com/cumakurt/wifiangel.git
-cd wifiangel
+pip install -r requirements.txt
 ```
 
-2. Install required packages:
+### System tools (minimum session set)
+
+At startup, the app checks that these binaries are on `PATH`:
+
+- `airmon-ng`, `airodump-ng`, `aireplay-ng`
+- `hashcat`
+- `hcxdumptool`
+
+Other features need additional packages, for example:
+
+| Feature area | Typical packages (Debian/Ubuntu examples) |
+|--------------|-------------------------------------------|
+| Core Wi-Fi | `aircrack-ng` |
+| Handshake / capture | `aircrack-ng` |
+| PMKID | `hcxdumptool`; hash conversion may use `hcxpcapngtool` (often from `hcxtools`) |
+| Cracking | `hashcat` |
+| Evil Twin | `hostapd`, `dnsmasq`; `iptables` / `ip` for NAT |
+| WPS | `reaver` (or equivalent) |
+| Optionals | `bettercap`, `curl`, `nmcli`, `macchanger` |
+
+Install examples:
+
 ```bash
 sudo apt update
-sudo apt install -y aircrack-ng hashcat hcxdumptool hostapd dnsmasq macchanger reaver python3-scapy
+sudo apt install -y aircrack-ng hashcat hcxdumptool hcxtools hostapd dnsmasq macchanger reaver
 ```
 
-3. Install Python dependencies:
-```bash
-pip3 install -r requirements.txt
-```
+Optional: `sudo apt install -y bettercap wireless-tools` if you rely on legacy helpers.
 
-## 💻 Usage
+## Quick start
 
-Run the tool with root privileges:
+From the repository root:
 
 ```bash
 sudo python3 wifiangel.py
 ```
 
-## 🛡️ Features in Detail
+The launcher validates root, OS, Python imports, creates runtime folders, warns about optional missing tools, then starts the interactive menu.
 
-### Network Discovery
-- Active and passive network scanning
-- Real-time signal strength monitoring
-- Client detection and tracking
-- Hidden network discovery
+## What the tool does (overview)
 
-### Attack Techniques
-- WPA/WPA2/WPA3 handshake capture
-- PMKID attack
-- Evil Twin attack
-- Deauthentication attack
-- Dictionary attack
-- Hybrid attack (Handshake + PMKID)
+- **Network discovery:** Passive scan using `airodump-ng` CSV export, merged into a live results table (monitor mode).
+- **Attacks menu:** Handshake capture, deauthentication, PMKID capture, dictionary attacks, hybrid flows, WPS, Evil Twin lab, and MITM-oriented workflows that depend on external tools.
+- **Evil Twin:** Raises an AP with DHCP/DNS via `hostapd` and `dnsmasq`. When a **separate uplink** exists (e.g. Ethernet with a default route), the app configures IPv4 forwarding and NAT so associated clients can reach the internet through your host.
+- **Reports:** Session logs and HTML summaries are written under configurable paths (see below).
 
-### Analysis Tools
-- Channel optimization
-- Signal strength analysis
-- Client behavior analysis
-- Network speed testing
-- Security audit
+Exact behavior depends on hardware, drivers, regulator domain, and which optional tools are installed.
 
-### Reporting
-- Detailed HTML reports
-- Attack logs
-- Network statistics
-- Security recommendations
+## Repository layout (high level)
 
-## ⚠️ Legal Disclaimer
+| Path | Role |
+|------|------|
+| `wifiangel.py` | Entry point: `app.main` |
+| `app/wifi_angel.py` | Main controller and menus |
+| `app/ui/` | Rich theme and shared UI components |
+| `adapters/system_tools/` | Command runners, Wi-Fi adapter helpers |
+| `attacks/` | Command builders and parsers for external tools |
+| `wifi/` | Frame/CSV helpers (e.g. `airodump-ng` CSV parsing) |
+| `config/` | Defaults, paths, environment checks |
+| `reports/` | Report generation |
+| `tests/` | `pytest` suite |
 
-This tool is provided for educational and testing purposes ONLY. Users are responsible for complying with all applicable local, state, and federal laws. Developers assume NO liability and are NOT responsible for any misuse or damage caused by this program.
+## Runtime directories
 
-## 📝 License
+Created or used at run time (under the working directory unless configured otherwise):
 
-This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
+- `logs/` - session logs and reports
+- `handshake/` - captures and PMKID-related outputs
+- `tmp/` - temporary scan prefixes and similar files
+- `auto_hack_sessions/` - automated session artifacts
 
----
+## Development
 
-# Türkçe Dokümantasyon
-
-## 🌟 Özellikler
-
-- 📡 **Ağ Keşfi ve İzleme**
-  - Gerçek zamanlı ağ taraması
-  - Gizli SSID keşfi
-  - İstemci tespiti ve takibi
-  - Sinyal gücü analizi
-
-- 🔒 **Güvenlik Analizi**
-  - WPA/WPA2/WPA3 el sıkışması yakalama
-  - PMKID saldırı desteği
-  - Sözlük saldırısı yetenekleri
-  - Evil Twin saldırı çerçevesi
-  - Ortadaki Adam (MITM) saldırısı
-
-- 🛠️ **Gelişmiş Araçlar**
-  - Kanal optimizasyonu
-  - MAC adresi değiştirme
-  - Ağ hız testi
-  - Bluetooth ve IoT cihaz taraması
-  - Trafik analizi
-
-- 📊 **Raporlama ve Analiz**
-  - Detaylı saldırı günlükleri
-  - Ağ istatistikleri
-  - İstemci analizi
-  - Güvenlik denetim raporları
-  - HTML ve metin rapor oluşturma
-
-## 🚀 Kurulum
-
-1. Depoyu klonlayın:
-```bash
-git clone https://github.com/cumakurt/wifiangel.git
-cd wifiangel
-```
-
-2. Gerekli paketleri yükleyin:
-```bash
-sudo apt update
-sudo apt install -y aircrack-ng hashcat hcxdumptool hostapd dnsmasq macchanger reaver python3-scapy
-```
-
-3. Python bağımlılıklarını yükleyin:
-```bash
-pip3 install -r requirements.txt
-```
-
-## 💻 Kullanım
-
-Aracı root yetkileriyle çalıştırın:
+Run tests:
 
 ```bash
-sudo python3 wifiangel.py
+python -m pytest
 ```
 
-## 🛡️ Detaylı Özellikler
+## License
 
-### Ağ Keşfi
-- Aktif ve pasif ağ taraması
-- Gerçek zamanlı sinyal gücü izleme
-- İstemci tespiti ve takibi
-- Gizli ağ keşfi
+This project is licensed under the **GNU General Public License v3.0**. See the `LICENSE` file.
 
-### Saldırı Teknikleri
-- WPA/WPA2/WPA3 el sıkışması yakalama
-- PMKID saldırısı
-- Evil Twin saldırısı
-- Deauthentication saldırısı
-- Sözlük saldırısı
-- Hibrit saldırı (El sıkışması + PMKID)
+## Disclaimer
 
-### Analiz Araçları
-- Kanal optimizasyonu
-- Sinyal gücü analizi
-- İstemci davranış analizi
-- Ağ hız testi
-- Güvenlik denetimi
-
-### Raporlama
-- Detaylı HTML raporları
-- Saldırı günlükleri
-- Ağ istatistikleri
-- Güvenlik önerileri
-
-## ⚠️ Yasal Uyarı
-
-Bu araç YALNIZCA eğitim ve test amaçları için sağlanmıştır. Kullanıcılar tüm geçerli yerel ve genel  yasalara uymakla yükümlüdür. Geliştiriciler, bu programın herhangi bir yanlış kullanımından veya neden olduğu hasardan sorumlu DEĞİLDİR ve hiçbir şekilde sorumluluk kabul etmez.
-
-## 📝 Lisans
-
-Bu proje GPL-3.0 Lisansı altında lisanslanmıştır - detaylar için [LICENSE](LICENSE) dosyasına bakın. 
+The authors and contributors are not responsible for misuse. You are solely responsible for complying with applicable laws and for obtaining proper authorization before testing any network.

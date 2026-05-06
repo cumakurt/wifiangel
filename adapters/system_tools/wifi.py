@@ -50,6 +50,15 @@ def parse_iw_dev_monitor_interface(output: str) -> Optional[str]:
     return None
 
 
+def parse_iw_dev_info_interface_type(output: str) -> Optional[str]:
+    """Parse ``iw dev <iface> info`` stdout; return lowercase type (managed, monitor, ap, ...)."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("type "):
+            return stripped[5:].strip().lower()
+    return None
+
+
 def parse_iwconfig_wireless_interfaces(output: str) -> List[str]:
     interfaces = []
     for line in output.splitlines():
@@ -122,6 +131,16 @@ class WiFiAdapterManager:
             return parse_iwconfig_monitor_interface(output)
         except (FileNotFoundError, subprocess.CalledProcessError, OSError):
             return None
+
+    def get_interface_type(self, interface: str) -> Optional[str]:
+        """Return nl80211 interface type from ``iw dev <iface> info``, or None if unavailable."""
+        result = self.runner.run(
+            ["iw", "dev", interface, "info"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return None
+        return parse_iw_dev_info_interface_type(result.stdout)
 
     def start_monitor_mode(self, interface: str) -> str:
         self.runner.run(["systemctl", "stop", "NetworkManager"], stdout=subprocess.PIPE)

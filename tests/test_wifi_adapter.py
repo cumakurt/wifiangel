@@ -9,7 +9,7 @@ from adapters.system_tools import (
     parse_iwconfig_monitor_interface,
     parse_iwconfig_wireless_interfaces,
 )
-from adapters.system_tools.wifi import parse_iw_dev_monitor_interface
+from adapters.system_tools.wifi import parse_iw_dev_info_interface_type, parse_iw_dev_monitor_interface
 
 
 class FakeRunner:
@@ -69,6 +69,25 @@ class WiFiAdapterParsingTests(unittest.TestCase):
         output = "phy#0\n\tInterface wlan0\n\t\ttype managed\n\tInterface wlan0mon\n\t\ttype monitor\n"
         self.assertEqual(parse_iw_dev_monitor_interface(output), "wlan0mon")
 
+    def test_parse_iw_dev_info_interface_type_managed_and_ap(self):
+        self.assertEqual(
+            parse_iw_dev_info_interface_type("\taddr 00:11:22\n\ttype managed\n"),
+            "managed",
+        )
+        self.assertEqual(parse_iw_dev_info_interface_type("\ttype AP\n"), "ap")
+
+    def test_get_interface_type_from_iw_dev_info(self):
+        runner = FakeRunner()
+        manager = WiFiAdapterManager(runner)
+
+        class Result:
+            returncode = 0
+            stdout = "\tInterface wlan0\n\ttype monitor\n"
+            stderr = ""
+
+        runner.run = lambda *a, **k: Result()
+
+        self.assertEqual(manager.get_interface_type("wlan0"), "monitor")
 
 class WiFiAdapterManagerTests(unittest.TestCase):
     def test_start_monitor_mode_prefers_mon_suffix_directory(self):
