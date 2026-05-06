@@ -29,12 +29,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
+from typing import Optional
 
 import netifaces
 import nmap
 from bleak import BleakScanner
 from rich import box
-from rich.box import ROUNDED
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
@@ -73,11 +73,20 @@ from adapters.system_tools import (
     upload_speed_rating,
 )
 from app.logger import Logger
+from app.ui import (
+    BORDER_STYLE,
+    TUI_THEME,
+    create_scan_results_table,
+    render_menu_panel,
+    render_welcome_banner,
+    target_banner,
+)
 from attacks.commands import (
     aircrack_check,
     aircrack_crack,
     aireplay_deauth,
     airodump_capture,
+    airodump_network_discovery,
     hashcat_crack,
     hcxdumptool_capture,
     hcxpcapngtool_convert,
@@ -93,14 +102,13 @@ from attacks.parsers import (
 from cleanup import resolve_evil_twin_log_dir
 from config import (
     AUTO_HACK_SESSIONS_DIR,
-    CHANNELS_2GHZ,
-    CHANNELS_5GHZ,
     DEFAULT_WORDLIST,
     HANDSHAKE_DIR,
     ROCKYOU_WORDLIST,
     TMP_DIR,
     WIFI_ANGEL_SESSION_BINARIES,
 )
+from wifi.airodump_csv import ap_row_to_network_fields, parse_airodump_csv, station_client_counts
 from wifi.packets import (
     get_security_info as packet_get_security_info,
     parse_client_observation,
@@ -111,40 +119,36 @@ from wifi.packets import (
 class WiFiAngel:
     def __init__(self):
         if os.geteuid() != 0:
-            print("[bold red]❌ Root privileges are required to run WiFiAngel.[/]")
+            print("[bold red]Root privileges are required to run WiFiAngel.[/]")
             sys.exit(1)
 
-        self.console = Console()
+        self.console = Console(theme=TUI_THEME, highlight=True)
         self.networks = {}
         self.clients = {}
         self.interface_name = None
         self.selected_network = None
         self.scanning = False
         self.current_menu = "main"
+        self._suppress_live_updates = False
+        self._current_scan_channel = 0
         self.layout = Layout()
         self.live = Live("", console=self.console, auto_refresh=False)
         self.logger = Logger()
         self.command_runner = CommandRunner(logger=self.logger)
         self.wifi_adapter = WiFiAdapterManager(self.command_runner)
         
-        banner = """[blue]
-╔══════════════════ WiFiAngel 2025 ══════════════════╗
-║                                                    ║
-║    [red]🛡️  WiFiAngel[/]                                    ║
-║                                                    ║
-╚═════════ Wireless Network Analysis Tool ═══════════╝
-
-[white]Developed by[/] [yellow]Cuma KURT[/]  [white]cumakurt@gmail.com[/]
-[white]https://www.linkedin.com/in/cuma-kurt-34414917/[/]
-"""
-        self.console.print(banner)
+        render_welcome_banner(
+            self.console,
+            author_line="Cuma KURT  cumakurt@gmail.com",
+            url_line="https://www.linkedin.com/in/cuma-kurt-34414917/",
+        )
         
         try:
             required_tools = list(WIFI_ANGEL_SESSION_BINARIES)
             missing_tools = self.wifi_adapter.missing_tools(required_tools)
             
             if missing_tools:
-                self.console.print(f"[bold red]❌ Missing required tools: {', '.join(missing_tools)}[/]")
+                self.console.print(f"[bold red]Missing required tools: {', '.join(missing_tools)}[/]")
                 self.console.print("[yellow]Please install the missing tools using:[/]")
                 self.console.print("[white]sudo apt install aircrack-ng hashcat hcxdumptool[/]")
                 sys.exit(1)
@@ -165,38 +169,51 @@ class WiFiAngel:
                 )
             
             if len(wifi_interfaces) > 1:
-                self.console.print("\n[yellow]Multiple wireless interfaces found:[/]")
-                for i, iface in enumerate(wifi_interfaces, 1):
-                    self.console.print(f"{i}. {iface}")
-                choice = Prompt.ask("Select interface number", choices=[str(i) for i in range(1, len(wifi_interfaces)+1)])
+                self.console.print()
+                rows = "\n".join(
+                    f"  [menu.key]{i:>2}[/]  [cyan]{iface}[/]"
+                    for i, iface in enumerate(wifi_interfaces, 1)
+                )
+                self.console.print(
+                    Panel(
+                        rows,
+                        title="[title]Select wireless interface[/]",
+                        border_style=BORDER_STYLE,
+                        box=box.MINIMAL,
+                        padding=(1, 2),
+                    )
+                )
+                choice = Prompt.ask("[heading]Interface #[/]", choices=[str(i) for i in range(1, len(wifi_interfaces) + 1)])
                 self.interface_name = wifi_interfaces[int(choice)-1]
             else:
                 self.interface_name = wifi_interfaces[0]
                 
-            self.console.print(f"[bold green]✓ WiFi adapter initialized successfully: {self.interface_name}[/]")
+            self.console.print(f"[success]OK[/] [meta]Adapter ready[/]  [cyan]{self.interface_name}[/]")
             self.logger.info(f"WiFi adapter initialized: {self.interface_name}")
             
         except Exception as e:
             self.logger.error(f"Could not initialize WiFi adapter: {str(e)}")
-            self.console.print(f"[bold red]❌ Could not initialize WiFi adapter: {str(e)}[/]")
+            self.console.print(f"[bold red]Could not initialize WiFi adapter: {str(e)}[/]")
             sys.exit(1)
 
     def create_header(self):
         return Panel(
-            "[bold red]WiFiAngel[/] - [bold blue]Wireless Network Analysis Tool[/]",
-            style="white on black"
+            "[brand]WiFiAngel[/]  [meta]|[/]  [menu.dim]Wireless Network Analysis Tool[/]",
+            border_style=BORDER_STYLE,
+            box=box.MINIMAL,
+            padding=(0, 1),
         )
         
     def start_monitor_mode(self):
         try:
-            self.console.print("[bold green]Starting monitor mode...[/]")
+            self.console.print("[info]Starting monitor mode...[/]")
             self.logger.info("Starting monitor mode")
 
             original_interface = self.interface_name
             self.interface_name = self.wifi_adapter.start_monitor_mode(self.interface_name)
             self.logger.info(f"{original_interface} switched to monitor mode")
             
-            self.console.print(f"[bold green]Monitor mode active: {self.interface_name}[/]")
+            self.console.print(f"[success]Monitor mode active[/]  [cyan]{self.interface_name}[/]")
             self.logger.info(f"Monitor mode active: {self.interface_name}")
             return True
         except Exception as e:
@@ -204,48 +221,102 @@ class WiFiAngel:
             self.console.print(f"[bold red]Error: {str(e)}[/]")
             return False
 
-    def _channel_hopper(self):
-        while self.scanning:
-            try:
-                for channel in CHANNELS_2GHZ:
-                    if not self.scanning:
-                        break
+    def _airodump_scan_loop(self):
+        """Passive discovery via airodump-ng CSV (--band abg); merge rows into self.networks."""
+        tmp = Path(TMP_DIR)
+        tmp.mkdir(parents=True, exist_ok=True)
+        prefix = tmp / f"wa_scan_{os.getpid()}_{threading.get_ident()}_{int(time.time() * 1000)}"
+        csv_path = Path(f"{prefix}-01.csv")
+        argv = airodump_network_discovery(self.interface_name, prefix, write_interval=1)
+        proc: Optional[subprocess.Popen] = None
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            while self.scanning:
+                time.sleep(1.05)
+                if proc.poll() is not None:
+                    self.logger.error(f"airodump-ng exited unexpectedly (code {proc.returncode})")
+                    break
+                if not csv_path.is_file():
+                    continue
+                try:
+                    aps, stas = parse_airodump_csv(csv_path)
+                    by_bssid = station_client_counts(stas)
+                    now = datetime.now()
+                    with self._networks_lock:
+                        for ap in aps:
+                            fields = ap_row_to_network_fields(ap)
+                            if not fields:
+                                continue
+                            bssid = fields["bssid"]
+                            ch = int(fields["channel"] or 0)
+                            ssid_val = fields["ssid"]
+                            sig = int(fields["signal"])
+                            cipher_str = str(fields["cipher"])
+                            beacons = int(fields["beacons"])
+                            wps = bool(fields["wps"])
+                            st_clients = by_bssid.get(bssid, set())
+                            if bssid not in self.networks:
+                                self.networks[bssid] = {
+                                    "ssid": ssid_val,
+                                    "signal": sig,
+                                    "cipher": cipher_str,
+                                    "clients": set(st_clients),
+                                    "channel": ch if ch > 0 else 0,
+                                    "first_seen": now,
+                                    "last_seen": now,
+                                    "packets": beacons,
+                                    "data_packets": 0,
+                                    "wps": wps,
+                                }
+                            else:
+                                prev = self.networks[bssid]
+                                merged_clients = set(prev["clients"])
+                                merged_clients.update(st_clients)
+                                upd = {
+                                    "last_seen": now,
+                                    "signal": sig,
+                                    "packets": max(prev["packets"], beacons),
+                                    "cipher": cipher_str,
+                                    "wps": wps or prev.get("wps", False),
+                                    "clients": merged_clients,
+                                }
+                                if ch > 0:
+                                    upd["channel"] = ch
+                                if (
+                                    ssid_val
+                                    and ssid_val != "<Hidden Network>"
+                                    and prev.get("ssid") == "<Hidden Network>"
+                                ):
+                                    upd["ssid"] = ssid_val
+                                self.networks[bssid].update(upd)
+                except Exception as e:
+                    if self.scanning:
+                        self.logger.error(f"airodump CSV merge error: {e}")
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
                     try:
-                        self.command_runner.set_wireless_channel(self.interface_name, channel)
-                        time.sleep(0.08)
-                    except:
-                        continue
-
-                for channel in CHANNELS_5GHZ:
-                    if not self.scanning:
-                        break
-                    try:
-                        self.command_runner.set_wireless_channel(self.interface_name, channel)
-                        time.sleep(0.08)
-                    except:
-                        continue
-            except Exception as e:
-                self.logger.error(f"Channel hopping error: {str(e)}")
-                time.sleep(0.1)
-
-    def _packet_sniffer(self):
-        while self.scanning:
+                        proc.kill()
+                    except Exception:
+                        pass
             try:
-                sniff(iface=self.interface_name, 
-                     prn=self.packet_handler, 
-                     store=0,
-                     timeout=0.3,
-                     count=150)
-            except Exception as e:
-                if self.scanning:
-                    self.logger.error(f"Sniffing error: {str(e)}")
-                time.sleep(0.1)
+                for p in prefix.parent.glob(prefix.name + "*"):
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _results_updater(self):
         while self.scanning:
             try:
-                if self.networks:
-                    self.print_results()
+                self.print_results()
                 time.sleep(0.3)
             except Exception as e:
                 self.logger.error(f"Results update error: {str(e)}")
@@ -253,17 +324,20 @@ class WiFiAngel:
 
     def scan_networks(self):
         self.logger.info("Starting network scan")
-        self.live.start()
-        
+        self._suppress_live_updates = False
+        try:
+            self.live.start()
+        except Exception:
+            pass
+
         if not hasattr(self, '_networks_lock'):
             self._networks_lock = threading.Lock()
-        
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = []
-            futures.append(executor.submit(self._channel_hopper))
-            futures.append(executor.submit(self._packet_sniffer))
-            futures.append(executor.submit(self._results_updater))
-            
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(self._airodump_scan_loop),
+                executor.submit(self._results_updater),
+            ]
             try:
                 while self.scanning:
                     time.sleep(0.1)
@@ -276,11 +350,15 @@ class WiFiAngel:
                 self.scanning = False
                 self.console.print("\n[bold yellow]Stopping network scan...[/]")
             finally:
-                self.live.stop()
+                try:
+                    self.live.stop()
+                except Exception:
+                    pass
+                self._suppress_live_updates = False
                 for future in futures:
                     try:
-                        future.result(timeout=1.0)
-                    except:
+                        future.result(timeout=2.0)
+                    except Exception:
                         pass
                 self.logger.info("Network scan stopped")
                 gc.collect()
@@ -291,13 +369,17 @@ class WiFiAngel:
             if network_observation:
                 with self._networks_lock:
                     bssid = network_observation.bssid
+                    ch = network_observation.channel
+                    if ch <= 0:
+                        ch = int(getattr(self, "_current_scan_channel", 0) or 0)
+                    ssid_val = network_observation.ssid
                     if bssid not in self.networks:
                         self.networks[bssid] = {
-                            'ssid': network_observation.ssid,
+                            'ssid': ssid_val,
                             'signal': network_observation.signal,
                             'cipher': "/".join(network_observation.security),
                             'clients': set(),
-                            'channel': network_observation.channel,
+                            'channel': ch,
                             'first_seen': datetime.now(),
                             'last_seen': datetime.now(),
                             'packets': 1,
@@ -306,11 +388,21 @@ class WiFiAngel:
                         }
                         self.logger.debug(f"New network found: {network_observation.ssid} ({bssid})")
                     else:
-                        self.networks[bssid].update({
+                        prev = self.networks[bssid]
+                        upd = {
                             'last_seen': datetime.now(),
                             'signal': network_observation.signal,
-                            'packets': self.networks[bssid]['packets'] + 1
-                        })
+                            'packets': prev['packets'] + 1
+                        }
+                        if ch > 0:
+                            upd['channel'] = ch
+                        if (
+                            ssid_val
+                            and ssid_val != "<Hidden Network>"
+                            and prev.get('ssid') == "<Hidden Network>"
+                        ):
+                            upd['ssid'] = ssid_val
+                        self.networks[bssid].update(upd)
             
             else:
                 client_observation = parse_client_observation(pkt)
@@ -342,47 +434,72 @@ class WiFiAngel:
 
     def print_results(self):
         """Shows results in table format"""
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("No")
-        table.add_column("BSSID")
-        table.add_column("SSID")
-        table.add_column("Channel")
-        table.add_column("Security")
-        table.add_column("Signal")
-        table.add_column("Clients")
+        if getattr(self, "_suppress_live_updates", False):
+            return
+        table = create_scan_results_table()
 
         for idx, (bssid, data) in enumerate(self.networks.items(), 1):
             table.add_row(
                 str(idx),
                 bssid,
-                data['ssid'],
-                str(data['channel']),
-                data['cipher'],
-                str(data['signal']),
-                str(len(data['clients']))
+                data["ssid"],
+                str(data["channel"]),
+                data["cipher"],
+                str(data["signal"]),
+                str(len(data["clients"])),
             )
 
-        # Update Live display
-        self.live.update(table)
-        self.live.refresh()
+        try:
+            self.live.update(table)
+            self.live.refresh()
+        except Exception:
+            pass
+
+    def _scan_screen_until_enter(self) -> None:
+        """Wait for Enter then return to main menu while capture threads keep running."""
+        try:
+            self.console.input("\n[meta]Press Enter to return to the main menu.[/] ")
+        except EOFError:
+            pass
+        self._suppress_live_updates = True
+        try:
+            self.live.stop()
+        except Exception:
+            pass
+        self.console.clear()
 
     def show_main_menu(self):
         """Shows the main menu"""
         self.current_menu = "main"
         while True:
             try:
-                self.console.print("\n[bold yellow]Main Menu[/]")
-                self.console.print("1. 📡 Start Monitor Mode")
+                intro = [f"[meta]Adapter[/]  [cyan]{self.interface_name}[/]"]
                 if self.scanning:
-                    self.console.print("[bold green]🔍 Network Scan Active[/]")
-                self.console.print("2. 🔍 Start/Stop Network Scan")
-                self.console.print("3. 🎯 Select Target Network")
-                self.console.print("4. ⚔️ Attack Techniques")
-                self.console.print("5. 🔧 Tools")
-                self.console.print("6. 🚀 Auto Hack")
-                self.console.print("0. ❌ Exit")
-                
-                choice = Prompt.ask("Select an option")
+                    if getattr(self, "_suppress_live_updates", False):
+                        intro.append(
+                            "[success]SCAN[/] [meta]Capture active — live table off; option 2 stops scan[/]"
+                        )
+                    else:
+                        intro.append(
+                            "[success]LIVE[/] [meta]Network scan running (table updates below)[/]"
+                        )
+
+                render_menu_panel(
+                    self.console,
+                    heading="Main menu",
+                    intro_lines=intro,
+                    items=[
+                        ("1", "Start monitor mode"),
+                        ("2", "Start or stop network scan"),
+                        ("3", "Select target network"),
+                        ("4", "Attack techniques"),
+                        ("5", "Tools"),
+                        ("6", "Auto hack workflow"),
+                        ("0", "Exit"),
+                    ],
+                )
+
+                choice = Prompt.ask("[heading]Option[/]")
                 self.logger.info(f"Main menu selection: {choice}")
                 
                 if choice == "1":
@@ -391,20 +508,32 @@ class WiFiAngel:
                 elif choice == "2":
                     # Check if monitor mode is active
                     if not self.interface_name.endswith("mon"):
-                        self.console.print("[bold yellow]⚠️ Monitor mode is not active![/]")
-                        self.console.print("[bold blue]Enabling monitor mode automatically...[/]")
+                        self.console.print("[warning]Monitor mode is required for scanning.[/]")
+                        self.console.print("[info]Enabling monitor mode automatically...[/]")
                         if not self.start_monitor_mode():
-                            self.console.print("[bold red]❌ Failed to enable monitor mode. Please try again.[/]")
+                            self.console.print("[error]Could not enable monitor mode.[/]")
                             continue
-                    
+
                     self.scanning = not self.scanning
                     if self.scanning:
+                        self.console.clear()
+                        self.console.print(
+                            Panel(
+                                "[heading]Network scan[/]\n\n"
+                                "[meta]Live table below. From the main menu, use option 2 again to stop.[/]\n"
+                                f"[meta]Adapter[/]  [cyan]{self.interface_name}[/]",
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
+                            )
+                        )
+                        self.console.print()
                         scan_thread = threading.Thread(target=self.scan_networks)
                         scan_thread.daemon = True
                         scan_thread.start()
-                        self.console.print("[bold green]Network scan started. Press Ctrl+C to stop.[/]")
+                        time.sleep(0.2)
+                        self._scan_screen_until_enter()
                     else:
-                        self.console.print("[bold yellow]Stopping network scan...[/]")
+                        self.console.print("[warning]Stopping scan...[/]")
                 elif choice == "3":
                     self.select_target_network()
                 elif choice == "4":
@@ -444,20 +573,26 @@ class WiFiAngel:
         while True:
             if self.selected_network:
                 network = self.networks[self.selected_network]
-                self.console.print(Panel(f"[bold cyan]Selected Network: {network['ssid']} ({self.selected_network})[/]"))
-            
-            self.console.print("\n[bold yellow]Attack Techniques:[/]")
-            self.console.print("1. 📦 WPA/WPA2/WPA3 Handshake Capture")
-            self.console.print("2. ⚡ Deauthentication Attack")
-            self.console.print("3. 🔑 PMKID Attack")
-            self.console.print("4. 📚 Dictionary Attack")
-            self.console.print("5. 🎮 Hybrid Attack (Handshake + PMKID)")
-            self.console.print("6. 🔄 WPS Attack")
-            self.console.print("7. 🕵️ Evil Twin Attack")
-            self.console.print("8. 🔮 Man in the Middle Attack")
-            self.console.print("0. ↩️ Back to Main Menu")
-            
-            choice = Prompt.ask("Select an option")
+                target_banner(self.console, str(network["ssid"]), self.selected_network)
+
+            render_menu_panel(
+                self.console,
+                heading="Attack techniques",
+                intro_lines=["[meta]Authorized use only.[/]"],
+                items=[
+                    ("1", "WPA / WPA2 / WPA3 handshake capture"),
+                    ("2", "Deauthentication attack"),
+                    ("3", "PMKID capture"),
+                    ("4", "Dictionary attack"),
+                    ("5", "Hybrid (handshake + PMKID)"),
+                    ("6", "WPS attack"),
+                    ("7", "Evil twin lab"),
+                    ("8", "Man-in-the-middle toolkit"),
+                    ("0", "Back to main menu"),
+                ],
+            )
+
+            choice = Prompt.ask("[heading]Option[/]")
             
             if choice == "1":
                 self.capture_handshake()
@@ -482,20 +617,25 @@ class WiFiAngel:
     def show_tools_menu(self):
         """Shows tools menu"""
         while True:
-            self.console.print("\n[bold yellow]Tools:[/]")
-            self.console.print("1. 📡 WiFi Adapter Settings")
-            self.console.print("2. 📊 Network Statistics")
-            self.console.print("3. 📱 Client Analysis")
-            self.console.print("4. 🌐 MAC Address Changer")
-            self.console.print("5. 🔍 WiFi Signal Analyzer")
-            self.console.print("6. 📶 Channel Optimizer")
-            self.console.print("7. 🛡️ Security Audit")
-            self.console.print("8. 🕵️ WiFi Hidden SSID Discovery")
-            self.console.print("9. 🔎 Bluetooth & IoT Scanner")
-            self.console.print("10. ⚡ Network Speed Test")
-            self.console.print("0. ↩️ Back to Main Menu")
-            
-            choice = Prompt.ask("Select an option")
+            render_menu_panel(
+                self.console,
+                heading="Tools",
+                items=[
+                    ("1", "Wi-Fi adapter settings"),
+                    ("2", "Network statistics"),
+                    ("3", "Client analysis"),
+                    ("4", "MAC address changer"),
+                    ("5", "Signal analyzer"),
+                    ("6", "Channel optimizer"),
+                    ("7", "Security audit"),
+                    ("8", "Hidden SSID discovery"),
+                    ("9", "Bluetooth and IoT scan"),
+                    ("10", "Network speed test"),
+                    ("0", "Back to main menu"),
+                ],
+            )
+
+            choice = Prompt.ask("[heading]Option[/]")
             
             if choice == "1":
                 self.wifi_adapter_settings()
@@ -523,12 +663,18 @@ class WiFiAngel:
     def show_deauth_menu(self):
         """Shows deauthentication attack menu"""
         while True:
-            self.console.print("\n[bold yellow]Deauthentication Attack:[/]")
-            self.console.print("1. 🌐 All Clients Attack")
-            self.console.print("2. 🎯 Single Client Attack")
-            self.console.print("0. ↩️ Back")
-            
-            choice = Prompt.ask("Select an option")
+            render_menu_panel(
+                self.console,
+                heading="Deauthentication",
+                intro_lines=["[meta]Disconnect clients from the selected AP (authorized only).[/]"],
+                items=[
+                    ("1", "Broadcast: all associated clients"),
+                    ("2", "Single client MAC"),
+                    ("0", "Back"),
+                ],
+            )
+
+            choice = Prompt.ask("[heading]Option[/]")
             
             if choice == "1":
                 self.deauth_all_clients()
@@ -540,14 +686,19 @@ class WiFiAngel:
     def wifi_adapter_settings(self):
         """WiFi adapter settings menu"""
         while True:
-            self.console.print("\n[bold yellow]WiFi Adapter Settings:[/]")
-            self.console.print(f"Current Adapter: {self.interface_name}")
-            self.console.print("1. 📡 Change Adapter Mode")
-            self.console.print("2. 📶 Change Channel")
-            self.console.print("3. 📊 Adapter Information")
-            self.console.print("0. ↩️ Back")
-            
-            choice = Prompt.ask("Select an option")
+            render_menu_panel(
+                self.console,
+                heading="Wi-Fi adapter",
+                intro_lines=[f"[meta]Current interface[/]  [cyan]{self.interface_name}[/]"],
+                items=[
+                    ("1", "Switch monitor / managed mode"),
+                    ("2", "Set channel"),
+                    ("3", "Adapter information"),
+                    ("0", "Back"),
+                ],
+            )
+
+            choice = Prompt.ask("[heading]Option[/]")
             
             if choice == "1":
                 self.change_adapter_mode()
@@ -560,20 +711,25 @@ class WiFiAngel:
 
     def change_adapter_mode(self):
         """Changes adapter mode menu"""
-        self.console.print("\n[bold yellow]Adapter Mode:[/]")
-        self.console.print("1. Monitor Mode")
-        self.console.print("2. Managed Mode")
-        self.console.print("0. Back")
-        
-        choice = Prompt.ask("Select an option")
-        
+        render_menu_panel(
+            self.console,
+            heading="Adapter mode",
+            items=[
+                ("1", "Monitor mode"),
+                ("2", "Managed mode"),
+                ("0", "Back"),
+            ],
+        )
+
+        choice = Prompt.ask("[heading]Option[/]")
+
         try:
             if choice == "1":
                 self.interface_name = self.wifi_adapter.start_monitor_mode(self.interface_name)
-                self.console.print(f"[bold green]Monitor mode activated on {self.interface_name}![/]")
+                self.console.print(f"[success]Monitor mode[/]  [cyan]{self.interface_name}[/]")
                 self.logger.info(f"Monitor mode activated on {self.interface_name}")
             elif choice == "2":
-                self.console.print("[bold yellow]Switching to managed mode...[/]")
+                self.console.print("[info]Switching to managed mode...[/]")
                 self.interface_name = self.wifi_adapter.set_managed_mode(self.interface_name)
                 time.sleep(2)
 
@@ -581,14 +737,14 @@ class WiFiAngel:
                 try:
                     iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT).decode()
                     if "Mode:Managed" in iw_info:
-                        self.console.print(f"[bold green]Successfully switched to managed mode: {self.interface_name}[/]")
+                        self.console.print(f"[success]Managed mode[/]  [cyan]{self.interface_name}[/]")
                         self.logger.info(f"Switched to managed mode: {self.interface_name}")
                     else:
-                        self.console.print("[bold yellow]Warning: Interface might not be in managed mode[/]")
+                        self.console.print("[warning]Interface might not be in managed mode.[/]")
                 except Exception as e:
-                    self.console.print(f"[bold red]Error verifying interface mode: {str(e)}[/]")
+                    self.console.print(f"[error]Verification failed:[/] {e!s}")
         except Exception as e:
-            self.console.print(f"[bold red]Error: {str(e)}[/]")
+            self.console.print(f"[error]{e!s}[/]")
 
     def change_channel(self):
         """Changes channel"""
@@ -606,7 +762,7 @@ class WiFiAngel:
         try:
             interface_name = self.interface_name
             info = subprocess.check_output(["iwconfig", interface_name]).decode()
-            self.console.print(Panel(info, title="Adapter Information", border_style="blue"))
+            self.console.print(Panel(info, title="Adapter Information", border_style=BORDER_STYLE, box=box.MINIMAL))
         except Exception as e:
             self.console.print(f"[bold red]Error: {str(e)}[/]")
 
@@ -628,10 +784,10 @@ class WiFiAngel:
 
             output = result.stdout.strip() or result.stderr.strip()
             if result.ok:
-                self.console.print(Panel(output, title="MAC Changer", border_style="green"))
+                self.console.print(Panel(output, title="MAC Changer", border_style=BORDER_STYLE, box=box.MINIMAL))
                 self.logger.info(f"MAC address updated on {self.interface_name}")
             else:
-                self.console.print(Panel(output or "macchanger failed", title="MAC Changer Error", border_style="red"))
+                self.console.print(Panel(output or "macchanger failed", title="MAC Changer Error", border_style=BORDER_STYLE, box=box.MINIMAL))
                 self.logger.error(f"MAC address change failed on {self.interface_name}: {output}")
 
         while True:
@@ -652,7 +808,7 @@ class WiFiAngel:
                     ["macchanger", "-s", self.interface_name],
                     capture_output=True,
                 )
-                self.console.print(Panel(result.stdout.strip() or result.stderr.strip(), title="Current MAC", border_style="blue"))
+                self.console.print(Panel(result.stdout.strip() or result.stderr.strip(), title="Current MAC", border_style=BORDER_STYLE, box=box.MINIMAL))
             elif choice == "2":
                 apply_macchanger(["-r"])
             elif choice == "3":
@@ -696,7 +852,7 @@ class WiFiAngel:
             elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
             # Create main table
-            table = Table(show_header=True, header_style="bold magenta")
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
             table.add_column("BSSID", style="cyan")
             table.add_column("Channel", style="green")
             table.add_column("ESSID", style="yellow")
@@ -704,7 +860,7 @@ class WiFiAngel:
             table.add_column("Status", style="green")
             table.add_column("Time Elapsed", style="yellow")
 
-            status = "[bold green]PMKID Found! (Continuing...)" if pmkid_found else "[bold yellow]Capturing..."
+            status = "[bold green]PMKID Found! (Continuing...)" if pmkid_found else "[info]Capturing..."
             table.add_row(
                 self.selected_network,
                 str(network['channel']),
@@ -794,11 +950,11 @@ class WiFiAngel:
                 is_wpa3 = True
         
         self.console.print("\n[bold yellow]Dictionary Attack:[/]")
-        self.console.print("1. 📦 Use Handshake File")
-        self.console.print("2. 🔑 Use PMKID File")
+        self.console.print("1. Use handshake file")
+        self.console.print("2. Use PMKID file")
         if is_wpa3:
-            self.console.print("3. 🛡️ Use WPA3 SAE Hash")
-        self.console.print("0. ↩️ Back")
+            self.console.print("3. Use WPA3 SAE hash")
+        self.console.print("0. Back")
         
         choice = Prompt.ask("Select an option")
         
@@ -824,7 +980,7 @@ class WiFiAngel:
             for idx, file in enumerate(handshake_files, 1):
                 # Check if file contains handshake
                 result = subprocess.run(aircrack_check(file), capture_output=True, text=True)
-                status = "[green]✓ Valid" if has_aircrack_handshake(result.stdout) else "[red]✗ Invalid"
+                status = "[green]Valid" if has_aircrack_handshake(result.stdout) else "[red]Invalid"
                 self.console.print(f"{idx}. {file.name} - {status}")
                 
             # Let user select handshake file
@@ -963,7 +1119,7 @@ class WiFiAngel:
                 color = "bright_blue"
                 
             # Only show progress bar, don't use panel
-            progress_bar = f"[{color}]{'━' * filled_length}[/][dim]{'╍' * empty_length}[/] [bold {color}]{last_progress:.2f}%[/]"
+            progress_bar = f"[{color}]{'=' * filled_length}[/][dim]{'-' * empty_length}[/] [bold {color}]{last_progress:.2f}%[/]"
             
             return progress_bar
         
@@ -1127,7 +1283,7 @@ class WiFiAngel:
             elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
             # Results table
-            result_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Dictionary Attack Results[/]")
+            result_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Dictionary Attack Results[/]")
             result_table.add_column("Target", style="cyan")
             result_table.add_column("Status", style="green")
             result_table.add_column("Tested Keys", style="yellow")
@@ -1136,10 +1292,10 @@ class WiFiAngel:
             result_table.add_column("Password", style="red")
             
             if password_found and current_key and len(current_key) >= 8 and len(current_key) <= 63:
-                status = "[bold green]✓ CRACKED[/]"
+                status = "[success]CRACKED[/]"
                 password_display = f"[bold red]{current_key}[/]"
             else:
-                status = "[bold red]✗ FAILED[/]"
+                status = "[error]FAILED[/]"
                 password_display = "[dim]Not Found[/dim]"
                 # Reset these in case there was a false positive
                 password_found = False
@@ -1245,7 +1401,7 @@ class WiFiAngel:
             seconds = elapsed % 60
             elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
-            table = Table(show_header=True, header_style="bold magenta")
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
             table.add_column("BSSID", style="cyan")
             table.add_column("Channel", style="green")
             table.add_column("ESSID", style="yellow")
@@ -1254,7 +1410,7 @@ class WiFiAngel:
             table.add_column("Time Elapsed", style="yellow")
 
             with client_lock:
-                status = "[bold green]✓ Handshake Found! (Continuing...)" if handshake_found else "[bold yellow]Capturing..."
+                status = "[success]Handshake found (continuing)." if handshake_found else "[info]Capturing..."
                 table.add_row(
                     self.selected_network,
                     str(network['channel']),
@@ -1391,7 +1547,7 @@ class WiFiAngel:
                         pass
             
             # Show final results
-            results_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Attack Results[/]")
+            results_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Attack Results[/]")
             results_table.add_column("Method", style="cyan")
             results_table.add_column("Status", style="yellow")
             results_table.add_column("File", style="green")
@@ -1399,36 +1555,36 @@ class WiFiAngel:
             if handshake_found:
                 results_table.add_row(
                     "Handshake",
-                    "[bold green]✓ Captured![/]",
+                    "[success]Captured.[/]",
                     str(final_handshake)
                 )
             else:
                 results_table.add_row(
                     "Handshake",
-                    "[bold red]✗ Failed[/]",
+                    "[error]Failed.[/]",
                     ""
                 )
                 
             if pmkid_found:
                 results_table.add_row(
                     "PMKID",
-                    "[bold green]✓ Captured![/]",
+                    "[success]Captured.[/]",
                     str(pmkid_hash)
                 )
             else:
                 results_table.add_row(
                     "PMKID",
-                    "[bold red]✗ Failed[/]",
+                    "[error]Failed.[/]",
                     ""
                 )
             
             self.console.print("\n", results_table)
             
             if handshake_found or pmkid_found:
-                self.console.print("\n[bold green]✓ Hybrid attack completed successfully![/]")
+                self.console.print("\n[success]Hybrid attack completed successfully.[/]")
                 self.console.print("[yellow]Use Dictionary Attack to crack the captured files.[/]")
             else:
-                self.console.print("\n[bold red]✗ Hybrid attack failed. No hashes captured.[/]")
+                self.console.print("\n[error]Hybrid attack failed. No hashes captured.[/]")
             
             self.logger.info(f"Hybrid attack completed - Handshake: {handshake_found}, PMKID: {pmkid_found}")
             # Ensure menu state is properly reset
@@ -1445,7 +1601,7 @@ class WiFiAngel:
         signal_data = []
 
         def create_signal_table():
-            table = Table(show_header=True, header_style="bold magenta")
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
             table.add_column("Time", style="cyan")
             table.add_column("Signal Strength (dBm)", style="green")
             table.add_column("Quality", style="yellow")
@@ -1500,7 +1656,7 @@ class WiFiAngel:
                             channel_usage[i] += weight * 0.5
 
         # Create channel analysis table
-        table = Table(show_header=True, header_style="bold magenta")
+        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
         table.add_column("Channel", style="cyan")
         table.add_column("Band", style="green")
         table.add_column("Usage", style="yellow")
@@ -1526,7 +1682,7 @@ class WiFiAngel:
             self.console.print("[bold red]No networks found. Please scan first![/]")
             return
 
-        table = Table(show_header=True, header_style="bold magenta")
+        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
         table.add_column("Network", style="cyan")
         table.add_column("Security Issues", style="red")
         table.add_column("Risk Level", style="yellow")
@@ -1585,7 +1741,7 @@ class WiFiAngel:
         networks_list = list(self.networks.items())
         
         def create_hopper_table():
-            table = Table(show_header=True, header_style="bold magenta", box=ROUNDED)
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
             table.add_column("Current Network", style="cyan", width=30)
             table.add_column("Channel", style="green", justify="center")
             table.add_column("Clients", style="yellow", justify="center")
@@ -1601,7 +1757,7 @@ class WiFiAngel:
                 str(network['signal'])
             )
             
-            return Panel(table, title="[bold blue]Network Hopper[/]", border_style="blue")
+            return Panel(table, title="[bold blue]Network Hopper[/]", border_style=BORDER_STYLE, box=box.MINIMAL)
 
         try:
             with Live(create_hopper_table(), refresh_per_second=2) as live:
@@ -1626,11 +1782,11 @@ class WiFiAngel:
     def select_target_network(self):
         """Allows user to select a target network"""
         if not self.networks:
-            self.console.print("[bold red]❌ No networks found. Please scan first![/]")
+            self.console.print("[error]No networks found. Scan first.[/]")
             return
 
         # Create network selection table
-        table = Table(show_header=True, header_style="bold magenta")
+        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
         table.add_column("No", style="cyan", justify="center")
         table.add_column("BSSID", style="green")
         table.add_column("SSID", style="yellow")
@@ -1662,12 +1818,12 @@ class WiFiAngel:
             if 1 <= choice <= len(self.networks):
                 self.selected_network = list(self.networks.keys())[choice - 1]
                 network = self.networks[self.selected_network]
-                self.console.print(f"\n[bold green]✓ Selected network: {network['ssid']} ({self.selected_network})[/]")
+                self.console.print(f"\n[success]Selected network: {network['ssid']} ({self.selected_network})[/]")
                 self.logger.info(f"Selected target network: {network['ssid']} ({self.selected_network})")
             else:
-                self.console.print("[bold red]❌ Invalid network number![/]")
+                self.console.print("[error]Invalid network number.[/]")
         except ValueError:
-            self.console.print("[bold red]❌ Invalid input![/]")
+            self.console.print("[error]Invalid input.[/]")
 
     def auto_hack(self):
         """Automated hacking of all detected networks"""
@@ -1682,8 +1838,9 @@ class WiFiAngel:
                 "[white]4. The developer accepts no liability for misuse or damage caused by this tool.[/]\n\n"
                 "[bold red]By continuing, you acknowledge that you understand and accept these terms.[/]\n"
                 "[bold yellow]Press Ctrl+C at any time to abort and return to main menu.[/]",
-                title="[bold red]⚠️ WARNING ⚠️[/]",
-                border_style="red"
+                title="[warning]WARNING[/]",
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(disclaimer)
@@ -1700,7 +1857,7 @@ class WiFiAngel:
                 self.console.print("[bold yellow]Auto Hack aborted by user.[/]")
                 return
                 
-            self.console.print("[bold yellow]🚀 Starting Auto Hack...[/]")
+            self.console.print("[info]Starting Auto Hack...[/]")
             self.logger.info("Auto Hack mode initiated")
             
             # Create session directory with timestamp
@@ -1729,13 +1886,13 @@ class WiFiAngel:
                         self.interface_name = line.split()[0]
                         break
                 
-                self.console.print(f"[bold green]✓ Monitor mode enabled on {self.interface_name}[/]")
+                self.console.print(f"[success]Monitor mode enabled on {self.interface_name}[/]")
                 self.logger.info(f"Monitor mode enabled on {self.interface_name}")
                 with open(report_file, "a") as f:
                     f.write(f"Interface: {self.interface_name} (Monitor Mode)\n")
                 time.sleep(2)
             else:
-                self.console.print(f"[bold green]✓ Already in monitor mode: {self.interface_name}[/]")
+                self.console.print(f"[success]Already in monitor mode: {self.interface_name}[/]")
                 self.logger.info(f"Already in monitor mode: {self.interface_name}")
             
             # Step 2: Start network scan - SCAN TIME INCREASED TO 60 SECONDS
@@ -1778,11 +1935,11 @@ class WiFiAngel:
             network_count = len(self.networks)
             clients_count = sum(len(network['clients']) for network in self.networks.values())
             
-            self.console.print(f"[bold green]✓ Scan completed! Found {network_count} networks and {clients_count} clients.[/]")
+            self.console.print(f"[success]Scan completed. Found {network_count} networks and {clients_count} clients.[/]")
             
             # Display networks table
             if network_count > 0:
-                networks_table = Table(show_header=True, header_style="bold blue", box=ROUNDED, title="[bold green]Discovered Networks[/]")
+                networks_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold green]Discovered Networks[/]")
                 networks_table.add_column("SSID", style="cyan")
                 networks_table.add_column("BSSID", style="green")
                 networks_table.add_column("Channel", style="blue", justify="center")
@@ -1823,7 +1980,7 @@ class WiFiAngel:
                     f.write("\n")
             
             if not self.networks:
-                self.console.print("[bold red]❌ No networks found! Please check your WiFi adapter.[/]")
+                self.console.print("[error]No networks found. Check your WiFi adapter.[/]")
                 self.logger.error("No networks found during scan")
                 with open(report_file, "a") as f:
                     f.write("ERROR: No networks found during scan\n")
@@ -1871,7 +2028,7 @@ class WiFiAngel:
             scored_networks.sort(key=lambda x: x[2], reverse=True)
             
             # Display prioritized networks
-            priority_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Target Networks (Prioritized)[/]")
+            priority_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Target Networks (Prioritized)[/]")
             priority_table.add_column("Priority", style="cyan", justify="center")
             priority_table.add_column("Network", style="green")
             priority_table.add_column("Score", style="yellow", justify="center")
@@ -1920,7 +2077,7 @@ class WiFiAngel:
                 selected_indices = list(range(1, display_networks + 1))
             
             # Add a 3-minute timeout confirmation
-            self.console.print("\n[bold yellow]⚠️ You have 3 minutes to confirm your selection.[/]")
+            self.console.print("\n[warning]You have 3 minutes to confirm your selection.[/]")
             self.console.print("[bold cyan]Press Enter to continue immediately or Ctrl+C to abort.[/]")
             self.console.print("[bold red]Attack will automatically start after 3 minutes if no action is taken.[/]")
             
@@ -1937,7 +2094,7 @@ class WiFiAngel:
                         
                         if remaining <= 0:
                             # Timeout reached, proceed with attack
-                            live.update(Panel(f"[bold green]Timeout reached. Starting attack...[/]"))
+                            live.update(Panel(f"[bold green]Timeout reached. Starting attack...[/]", border_style=BORDER_STYLE, box=box.MINIMAL))
                             time.sleep(1)
                             break
                         
@@ -1945,7 +2102,7 @@ class WiFiAngel:
                         if select.select([sys.stdin], [], [], 0)[0]:
                             # Clear the input buffer
                             sys.stdin.readline()
-                            live.update(Panel(f"[bold green]Continuing with attack...[/]"))
+                            live.update(Panel(f"[bold green]Continuing with attack...[/]", border_style=BORDER_STYLE, box=box.MINIMAL))
                             time.sleep(1)
                             break
                         
@@ -1955,13 +2112,15 @@ class WiFiAngel:
                         live.update(Panel(
                             f"[bold yellow]Auto-start in: [bold red]{minutes:02d}:{seconds:02d}[/]\n\n"
                             f"[bold cyan]Press Enter to continue now[/]\n"
-                            f"[bold cyan]Press Ctrl+C to abort[/]"
+                            f"[bold cyan]Press Ctrl+C to abort[/]",
+                            border_style=BORDER_STYLE,
+                            box=box.MINIMAL,
                         ))
                         
                         # Short sleep to prevent high CPU usage
                         time.sleep(0.1)
             except KeyboardInterrupt:
-                self.console.print("\n[bold yellow]⚠️ Auto Hack aborted by user.[/]")
+                self.console.print("\n[warning]Auto Hack aborted by user.[/]")
                 self.logger.warning("Auto Hack aborted by user during timeout confirmation")
                 self._auto_hack_cleanup()
                 return
@@ -2037,7 +2196,7 @@ class WiFiAngel:
                     continue
             
             if not networks_with_clients:
-                self.console.print("[bold red]❌ No networks found with connected clients! Attack requires active clients.[/]")
+                self.console.print("[error]No networks with connected clients. Attack requires active clients.[/]")
                 self.logger.error("No networks with connected clients")
                 with open(report_file, "a") as f:
                     f.write("ERROR: No networks with connected clients found\n")
@@ -2058,7 +2217,7 @@ class WiFiAngel:
                     f.write(f"  Signal: {network['signal']}\n\n")
                 
             # Create results table
-            results_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Attack Results[/]")
+            results_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Attack Results[/]")
             results_table.add_column("Network", style="cyan")
             results_table.add_column("Status", style="yellow", width=40)
             results_table.add_column("Handshake", style="green")
@@ -2072,14 +2231,14 @@ class WiFiAngel:
                 if os.path.exists(wordlist_alt):
                     wordlist = wordlist_alt
                     self.console.print(
-                        f"[bold yellow]⚠️ Default wordlist not found, using {wordlist_alt} instead.[/]"
+                        f"[warning]Default wordlist not found, using {wordlist_alt} instead.[/]"
                     )
                     self.logger.warning(f"Default wordlist not found, using {wordlist_alt} instead")
                 else:
-                    self.console.print(f"[bold red]❌ No default wordlists found![/]")
+                    self.console.print(f"[error]No default wordlists found.[/]")
                     wordlist = Prompt.ask("[bold yellow]Please enter the path to a wordlist file (or press Enter to skip)")
                     if not wordlist or not os.path.exists(wordlist):
-                        self.console.print("[bold red]❌ No valid wordlist provided. Exiting auto hack...[/]")
+                        self.console.print("[error]No valid wordlist. Exiting auto hack.[/]")
                         self.logger.error("No valid wordlist provided, exiting auto hack")
                         self._auto_hack_cleanup()
                         return
@@ -2132,9 +2291,9 @@ class WiFiAngel:
                         except Exception as e:
                             self.logger.error(f"Error during auto hack of {network['ssid']}: {str(e)}")
                             result = {
-                                'status_message': f"[bold red]✗ Error: {str(e)}[/]",
-                                'handshake_status': "[red]✗ Failed",
-                                'pmkid_status': "[red]✗ Failed",
+                                'status_message': f"[error]Error: {str(e)}[/]",
+                                'handshake_status': "[red]Failed",
+                                'pmkid_status': "[red]Failed",
                                 'password': None,
                                 'handshake_file': None,
                                 'pmkid_file': None
@@ -2152,7 +2311,7 @@ class WiFiAngel:
                         progress.update(task, advance=1, description=f"[cyan]Processed {network['ssid']}")
                 
                 except KeyboardInterrupt:
-                    self.console.print("\n[bold yellow]⚠️ Auto Hack stopped by user.[/]")
+                    self.console.print("\n[warning]Auto Hack stopped by user.[/]")
                     self.logger.warning("Auto Hack stopped by user")
                     # Cancel all running futures
                     for future in future_to_network:
@@ -2172,13 +2331,13 @@ class WiFiAngel:
             self.console.print(results_table)
             
             # Analyze results
-            handshakes_captured = sum(1 for _, _, result in attack_results if "[green]✓ Captured" in result['handshake_status'])
-            pmkids_captured = sum(1 for _, _, result in attack_results if "[green]✓ Captured" in result['pmkid_status'])
+            handshakes_captured = sum(1 for _, _, result in attack_results if "[green]Captured" in result['handshake_status'])
+            pmkids_captured = sum(1 for _, _, result in attack_results if "[green]Captured" in result['pmkid_status'])
             passwords_found = sum(1 for _, _, result in attack_results if result['password'])
             
             # Generate comprehensive analysis and recommendations
             self.console.print("\n[bold blue]5. Attack Result Analysis[/]")
-            analysis_table = Table(show_header=True, header_style="bold blue", title="[bold green]Analysis Summary[/]")
+            analysis_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold green]Analysis Summary[/]")
             analysis_table.add_column("Metric", style="cyan")
             analysis_table.add_column("Value", style="yellow")
             analysis_table.add_column("Success Rate", style="green")
@@ -2210,7 +2369,7 @@ class WiFiAngel:
             # Generate security recommendations
             security_panel = Panel(
                 "[yellow]Network Security Analysis[/]\n\n" +
-                (f"[green]✓ Cracked {passwords_found} passwords out of {total_networks} networks.[/]\n\n" if passwords_found > 0 else "[red]✗ No passwords were cracked.[/]\n\n") +
+                (f"[success]Cracked {passwords_found} passwords out of {total_networks} networks.[/]\n\n" if passwords_found > 0 else "[error]No passwords were cracked.[/]\n\n") +
                 "[yellow]Security Recommendations:[/]\n" +
                 "- [cyan]Use WPA3 encryption when available for better security.[/]\n" +
                 "- [cyan]Use complex, randomly generated passwords (20+ characters).[/]\n" +
@@ -2222,7 +2381,8 @@ class WiFiAngel:
                 f"- [cyan]Networks with vulnerable security (WEP/WPA): {sum(1 for _, network, _ in attack_results if 'WEP' in network['cipher'] or ('WPA' in network['cipher'] and 'WPA2' not in network['cipher'] and 'WPA3' not in network['cipher']))}/{total_networks}[/]\n" +
                 f"- [cyan]Networks with recommended security (WPA3): {sum(1 for _, network, _ in attack_results if 'WPA3' in network['cipher'])}/{total_networks}[/]\n",
                 title="[bold magenta]Security Analysis & Recommendations[/]",
-                border_style="blue"
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(security_panel)
@@ -2276,19 +2436,19 @@ class WiFiAngel:
             html_report_file = session_dir / "auto_hack_report.html"
             self._generate_html_report(session_dir, attack_results, html_report_file)
                 
-            self.console.print(f"\n[bold green]✅ Auto Hack completed! Detailed reports saved to:[/]")
+            self.console.print("\n[success]Auto Hack completed. Detailed reports saved to:[/]")
             self.console.print(f"[bold cyan]  - Text Report: {report_file}[/]")
             self.console.print(f"[bold cyan]  - HTML Report: {html_report_file}[/]")
             
         except KeyboardInterrupt:
-            self.console.print("\n[bold yellow]⚠️ Auto Hack stopped by user.[/]")
+            self.console.print("\n[warning]Auto Hack stopped by user.[/]")
             self.logger.warning("Auto Hack stopped by user")
             self.scanning = False
             self._auto_hack_cleanup()
             self.current_menu = "main"
             return
         except Exception as e:
-            self.console.print(f"[bold red]❌ Error during Auto Hack: {str(e)}[/]")
+            self.console.print(f"[error]Error during Auto Hack: {str(e)}[/]")
             self.logger.error(f"Error during Auto Hack: {str(e)}")
             with open(report_file, "a") as f:
                 f.write(f"\nERROR: {str(e)}\n")
@@ -2305,8 +2465,8 @@ class WiFiAngel:
         try:
             # Calculate statistics
             total_networks = len(attack_results)
-            handshakes_captured = sum(1 for _, _, result in attack_results if "[green]✓ Captured" in result['handshake_status'])
-            pmkids_captured = sum(1 for _, _, result in attack_results if "[green]✓ Captured" in result['pmkid_status'])
+            handshakes_captured = sum(1 for _, _, result in attack_results if "[green]Captured" in result['handshake_status'])
+            pmkids_captured = sum(1 for _, _, result in attack_results if "[green]Captured" in result['pmkid_status'])
             passwords_found = sum(1 for _, _, result in attack_results if result['password'])
             vulnerable_networks = sum(1 for _, network, _ in attack_results if 'WEP' in network['cipher'] or ('WPA' in network['cipher'] and 'WPA2' not in network['cipher'] and 'WPA3' not in network['cipher']))
             wpa3_networks = sum(1 for _, network, _ in attack_results if 'WPA3' in network['cipher'])
@@ -2314,11 +2474,11 @@ class WiFiAngel:
             # Generate table rows for attack results
             attack_results_rows = ""
             for bssid, network, result in attack_results:
-                handshake_status = "✓ Captured" if "[green]✓ Captured" in result['handshake_status'] else "✗ Failed"
-                handshake_class = "success" if "[green]✓ Captured" in result['handshake_status'] else "error"
+                handshake_status = "Captured" if "[green]Captured" in result['handshake_status'] else "Failed"
+                handshake_class = "success" if "[green]Captured" in result['handshake_status'] else "error"
                 
-                pmkid_status = "✓ Captured" if "[green]✓ Captured" in result['pmkid_status'] else "✗ Failed"
-                pmkid_class = "success" if "[green]✓ Captured" in result['pmkid_status'] else "error"
+                pmkid_status = "Captured" if "[green]Captured" in result['pmkid_status'] else "Failed"
+                pmkid_class = "success" if "[green]Captured" in result['pmkid_status'] else "error"
                 
                 password = result['password'] if result['password'] else "Not found"
                 password_class = "success" if result['password'] else "warning"
@@ -2492,7 +2652,7 @@ class WiFiAngel:
             self.console.print("[bold red]No networks found. Please scan first![/]")
             return
 
-        table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Network Statistics[/]")
+        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Network Statistics[/]")
         table.add_column("Network", style="cyan")
         table.add_column("Channel", style="green")
         table.add_column("Security", style="yellow")
@@ -2522,7 +2682,7 @@ class WiFiAngel:
             self.console.print("[bold red]No networks found. Please scan first![/]")
             return
 
-        table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Client Analysis[/]")
+        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Client Analysis[/]")
         table.add_column("Client MAC", style="cyan")
         table.add_column("Connected To", style="green")
         table.add_column("Network Security", style="yellow")
@@ -2552,9 +2712,9 @@ class WiFiAngel:
             return
 
         self.console.print("\n[bold yellow]WPS Attack:[/]")
-        self.console.print("1. 🎯 Pixie Dust Attack")
-        self.console.print("2. 🔨 PIN Brute Force")
-        self.console.print("0. ↩️ Back")
+        self.console.print("1. Pixie Dust attack")
+        self.console.print("2. PIN brute force")
+        self.console.print("0. Back")
         
         choice = Prompt.ask("Select an option")
         
@@ -2578,7 +2738,7 @@ class WiFiAngel:
                         break
                     if output:
                         # Create status table
-                        table = Table(show_header=True, header_style="bold magenta")
+                        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
                         table.add_column("Network", style="cyan")
                         table.add_column("Status", style="yellow")
                         table.add_row(network['ssid'], output.strip())
@@ -2586,11 +2746,11 @@ class WiFiAngel:
                         
                         if "WPS PIN:" in output:
                             pin = output.split("WPS PIN:")[1].strip()
-                            self.console.print(f"\n[bold green]✓ WPS PIN found: {pin}[/]")
+                            self.console.print(f"\n[success]WPS PIN found: {pin}[/]")
                             break
                         elif "WPA PSK:" in output:
                             password = output.split("WPA PSK:")[1].strip()
-                            self.console.print(f"\n[bold green]✓ WPA Password found: {password}[/]")
+                            self.console.print(f"\n[success]WPA password found: {password}[/]")
                             break
 
         except KeyboardInterrupt:
@@ -2830,7 +2990,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
 
                 while True:
                     # Create main status table
-                    status_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Evil Twin Status[/]")
+                    status_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Evil Twin Status[/]")
                     status_table.add_column("Evil Twin SSID", style="cyan")
                     status_table.add_column("Channel", style="green")
                     status_table.add_column("Security", style="yellow")
@@ -2876,7 +3036,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                             tcp_connections = []
 
                     # Create TCP connections table
-                    tcp_table = Table(show_header=True, header_style="bold blue", title="[bold blue]Active TCP ESTABLISHED Connections[/] (Updates every 10s)")
+                    tcp_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Active TCP ESTABLISHED Connections[/] (Updates every 10s)")
                     tcp_table.add_column("Local Address", style="cyan")
                     tcp_table.add_column("Remote Address", style="green")
                     tcp_table.add_column("State", style="yellow")
@@ -2886,7 +3046,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                             tcp_table.add_row(conn[3], conn[4], conn[5])
 
                     # Create DNS queries table
-                    dns_table = Table(show_header=True, header_style="bold green", title="[bold blue]Recent DNS Queries[/]")
+                    dns_table = Table(show_header=True, header_style="bold green", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Recent DNS Queries[/]")
                     dns_table.add_column("Time", style="cyan")
                     dns_table.add_column("Client IP", style="green")
                     dns_table.add_column("Query", style="yellow")
@@ -2911,7 +3071,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                                         continue
 
                     # Create clients table
-                    clients_table = Table(show_header=True, header_style="bold yellow", title="[bold blue]Connected Clients[/]")
+                    clients_table = Table(show_header=True, header_style="bold yellow", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Connected Clients[/]")
                     clients_table.add_column("MAC Address", style="cyan")
                     clients_table.add_column("IP Address", style="green")
                     clients_table.add_column("Connected Since", style="yellow")
@@ -2984,9 +3144,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     # Update display with all tables
                     live.update(Group(
                         status_table,
-                        Panel(clients_table, title="Connected Clients"),
-                        Panel(dns_table, title="Recent DNS Queries"),
-                        Panel(tcp_table, title="TCP Connections")
+                        Panel(clients_table, title="Connected Clients", border_style=BORDER_STYLE, box=box.MINIMAL),
+                        Panel(dns_table, title="Recent DNS Queries", border_style=BORDER_STYLE, box=box.MINIMAL),
+                        Panel(tcp_table, title="TCP Connections", border_style=BORDER_STYLE, box=box.MINIMAL)
                     ))
 
                     time.sleep(1)
@@ -3081,9 +3241,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             if 'network_manager_status' in original_settings and original_settings['network_manager_status'] == 'active':
                 subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            self.console.print("[bold green]✓ Network settings restored successfully.[/]")
-            self.console.print("[bold green]✓ Interface switched back to managed mode.[/]")
-            self.console.print("[bold yellow]ℹ️ You can now manually connect to your WiFi network.[/]")
+            self.console.print("[success]Network settings restored successfully.[/]")
+            self.console.print("[success]Interface switched back to managed mode.[/]")
+            self.console.print("[info]You can now manually connect to your WiFi network.[/]")
             
         except Exception as e:
             self.logger.log_evil_twin(f"Error during cleanup: {str(e)}", error=True)
@@ -3101,7 +3261,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
                 if nm_status != "active":
-                    self.console.print("[bold yellow]⚠️ NetworkManager is not active, attempting to restart...[/]")
+                    self.console.print("[warning]NetworkManager is not active, attempting to restart...[/]")
                     try:
                         subprocess.run(["systemctl", "restart", "NetworkManager"], 
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -3110,22 +3270,22 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         nm_status = subprocess.run(["systemctl", "is-active", "NetworkManager"], 
                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
                         if nm_status != "active":
-                            self.console.print("[bold red]⚠️ Failed to restart NetworkManager[/]")
+                            self.console.print("[error]Failed to restart NetworkManager[/]")
                     except subprocess.TimeoutExpired:
-                        self.console.print("[bold red]⚠️ NetworkManager restart timed out[/]")
+                        self.console.print("[error]NetworkManager restart timed out[/]")
                     except Exception as e:
-                        self.console.print(f"[bold red]⚠️ Error restarting NetworkManager: {str(e)}[/]")
+                        self.console.print(f"[error]Error restarting NetworkManager: {str(e)}[/]")
             except subprocess.TimeoutExpired:
-                self.console.print("[bold red]⚠️ NetworkManager status check timed out[/]")
+                self.console.print("[error]NetworkManager status check timed out[/]")
             except Exception as e:
-                self.console.print(f"[bold red]⚠️ Error checking NetworkManager: {str(e)}[/]")
+                self.console.print(f"[error]Error checking NetworkManager: {str(e)}[/]")
             
             # Check wpa_supplicant status with timeout
             try:
                 wpa_status = subprocess.run(["systemctl", "is-active", "wpa_supplicant"], 
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
                 if wpa_status != "active":
-                    self.console.print("[bold yellow]⚠️ wpa_supplicant is not active, attempting to restart...[/]")
+                    self.console.print("[warning]wpa_supplicant is not active, attempting to restart...[/]")
                     try:
                         subprocess.run(["systemctl", "restart", "wpa_supplicant"], 
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
@@ -3134,21 +3294,21 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         wpa_status = subprocess.run(["systemctl", "is-active", "wpa_supplicant"], 
                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5).stdout.decode().strip()
                         if wpa_status != "active":
-                            self.console.print("[bold red]⚠️ Failed to restart wpa_supplicant[/]")
+                            self.console.print("[error]Failed to restart wpa_supplicant[/]")
                     except subprocess.TimeoutExpired:
-                        self.console.print("[bold red]⚠️ wpa_supplicant restart timed out[/]")
+                        self.console.print("[error]wpa_supplicant restart timed out[/]")
                     except Exception as e:
-                        self.console.print(f"[bold red]⚠️ Error restarting wpa_supplicant: {str(e)}[/]")
+                        self.console.print(f"[error]Error restarting wpa_supplicant: {str(e)}[/]")
             except subprocess.TimeoutExpired:
-                self.console.print("[bold red]⚠️ wpa_supplicant status check timed out[/]")
+                self.console.print("[error]wpa_supplicant status check timed out[/]")
             except Exception as e:
-                self.console.print(f"[bold red]⚠️ Error checking wpa_supplicant: {str(e)}[/]")
+                self.console.print(f"[error]Error checking wpa_supplicant: {str(e)}[/]")
             
             # Verify interface mode with improved error handling
             try:
                 iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
                 if "Mode:Managed" not in iw_info:
-                    self.console.print("[bold yellow]⚠️ Interface not in managed mode, attempting to fix...[/]")
+                    self.console.print("[warning]Interface not in managed mode, attempting to fix...[/]")
                     try:
                         subprocess.run(["ip", "link", "set", self.interface_name, "down"], 
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
@@ -3161,19 +3321,19 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         time.sleep(2)
                         iw_info = subprocess.check_output(["iwconfig", self.interface_name], stderr=subprocess.STDOUT, timeout=5).decode()
                         if "Mode:Managed" not in iw_info:
-                            self.console.print("[bold red]⚠️ Failed to set interface to managed mode[/]")
+                            self.console.print("[error]Failed to set interface to managed mode[/]")
                     except subprocess.TimeoutExpired:
-                        self.console.print("[bold red]⚠️ Interface mode change timed out[/]")
+                        self.console.print("[error]Interface mode change timed out[/]")
                     except Exception as e:
-                        self.console.print(f"[bold red]⚠️ Error changing interface mode: {str(e)}[/]")
+                        self.console.print(f"[error]Error changing interface mode: {str(e)}[/]")
             except subprocess.TimeoutExpired:
-                self.console.print("[bold red]⚠️ Interface check timed out[/]")
+                self.console.print("[error]Interface check timed out[/]")
             except Exception as e:
-                self.console.print(f"[bold red]⚠️ Could not verify interface mode: {str(e)}[/]")
+                self.console.print(f"[error]Could not verify interface mode: {str(e)}[/]")
             
         except Exception as e:
             self.logger.error(f"Error during network service verification: {str(e)}")
-            self.console.print("[bold red]⚠️ Could not verify network services status[/]")
+            self.console.print("[error]Could not verify network services status[/]")
 
     def hidden_ssid_discovery(self):
         """Discovers hidden SSIDs in all available frequencies"""
@@ -3198,11 +3358,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         
         # Create header information and warning message
         self.console.print("[bold blue]Starting Hidden SSID Discovery...[/]")
-        self.console.print("[bold red]⚠️ Press Ctrl+C at any time to stop the scanning process! ⚠️[/]")
+        self.console.print("[warning]Press Ctrl+C at any time to stop the scanning process.[/]")
         self.console.print("[bold yellow]Scanning for hidden networks and waiting for probe requests...[/]")
 
         def create_status_table():
-            table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Hidden SSID Discovery[/]")
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Hidden SSID Discovery[/]")
             table.add_column("BSSID", style="cyan")
             table.add_column("Channel", style="green")
             table.add_column("Signal", style="blue")
@@ -3389,7 +3549,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 self.console.print("\n[bold green]Hidden Networks Found:[/]")
                 
                 # Create a more detailed final result table
-                final_table = Table(show_header=True, header_style="bold magenta", title="[bold blue]Hidden Network Discovery Results[/]")
+                final_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Hidden Network Discovery Results[/]")
                 final_table.add_column("BSSID", style="cyan")
                 final_table.add_column("Channel", style="green")
                 final_table.add_column("Signal", style="blue")
@@ -3472,9 +3632,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         menu = """
         [bold cyan]Bluetooth & IoT Scanner[/]
         
-        1. 📱 BLE Device Scanner
-        2. 🌐 IoT Service Discovery (mDNS)
-        0. ⬅️ Back to Tools Menu
+        1. BLE device scanner
+        2. IoT service discovery (mDNS)
+        0. Back to tools menu
         """
         self.console.print(menu)
         
@@ -3547,7 +3707,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
 
                 def create_status_table():
                     # Create and update the table with current results
-                    table = Table(show_header=True, header_style="bold magenta", title="[bold cyan]Discovered BLE Devices[/]")
+                    table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold cyan]Discovered BLE Devices[/]")
                     table.add_column("MAC Address", style="cyan")
                     table.add_column("Name", style="green")
                     table.add_column("Device Type", style="blue")
@@ -3571,7 +3731,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     return Group(table, time_info)
 
                 try:
-                    self.console.print("\n[bold cyan]🔍 Starting BLE scan (60 seconds)...[/]")
+                    self.console.print("\n[info]Starting BLE scan (60 seconds)...[/]")
                     self.console.print("[yellow]Press Ctrl+C to stop scanning[/]")
                     
                     async with BleakScanner(detection_callback=detection_callback) as scanner:
@@ -3581,7 +3741,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                                 await asyncio.sleep(0.5)
                                 
                     # Show final results
-                    self.console.print("\n[bold green]✓ Scan completed![/]")
+                    self.console.print("\n[success]Scan completed.[/]")
                     if devices:
                         self.console.print(create_status_table())
                     else:
@@ -3606,7 +3766,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             try:
                 iw_info = subprocess.check_output(["iwconfig", self.interface_name]).decode()
                 if "Mode:Monitor" in iw_info:
-                    self.console.print("[bold yellow]⚠️ Interface is in monitor mode. Switching to managed mode...[/]")
+                    self.console.print("[warning]Interface is in monitor mode. Switching to managed mode...[/]")
                     # Stop monitor mode
                     subprocess.run(["airmon-ng", "stop", self.interface_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     # Get original interface name
@@ -3618,7 +3778,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     # Restart network services
                     subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     time.sleep(2)
-                    self.console.print("[bold green]✓ Interface switched to managed mode[/]")
+                    self.console.print("[success]Interface switched to managed mode[/]")
             except Exception as e:
                 self.console.print(f"[bold red]Error checking interface mode: {str(e)}[/]")
                 return
@@ -3689,7 +3849,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                             }
                         
                         # Create and update the table
-                        table = Table(show_header=True, header_style="bold magenta", title=f"[bold cyan]Discovered IoT Services in {self.target_network}[/]")
+                        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title=f"[bold cyan]Discovered IoT Services in {self.target_network}[/]")
                         table.add_column("Name", style="cyan")
                         table.add_column("Type", style="green")
                         table.add_column("IP Addresses", style="yellow")
@@ -3712,7 +3872,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         
                         # Update display
                         self.console.clear()
-                        self.console.print(f"\n[bold cyan]🔍 Scanning for IoT services in {self.target_network}...[/]")
+                        self.console.print(f"\n[info]Scanning for IoT services in {self.target_network}...[/]")
                         self.console.print(Group(table, time_info))
                 
                 def update_service(self, zc, type_, name):
@@ -3744,7 +3904,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             ]
             
             try:
-                self.console.print(f"\n[bold cyan]🔍 Starting IoT service discovery in {ip_block}...[/]")
+                self.console.print(f"\n[info]Starting IoT service discovery in {ip_block}...[/]")
                 self.console.print("[yellow]Press Ctrl+C to stop scanning[/]")
                 browsers = [ServiceBrowser(zeroconf, service_type, listener) for service_type in service_types]
                 
@@ -3758,7 +3918,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 
                 # Show final results
                 if listener.discovered_services:
-                    self.console.print("\n[bold green]✓ Scan completed![/]")
+                    self.console.print("\n[success]Scan completed.[/]")
                 else:
                     self.console.print("\n[yellow]No IoT services found in the specified network.[/]")
                     
@@ -3829,7 +3989,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
             # Create main table
-            table = Table(show_header=True, header_style="bold magenta")
+            table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
             table.add_column("BSSID", style="cyan")
             table.add_column("Channel", style="green")
             table.add_column("ESSID", style="yellow")
@@ -3839,7 +3999,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             table.add_column("Security", style="magenta")
 
             with client_lock:
-                status = "[bold green]✓ Handshake Found! (Continuing...)" if handshake_found else "[bold yellow]Capturing..."
+                status = "[success]Handshake found (continuing)." if handshake_found else "[info]Capturing..."
                 security = "[bold cyan]WPA3" if is_wpa3 else "[bold yellow]WPA/WPA2"
                 table.add_row(
                     self.selected_network,
@@ -4097,9 +4257,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             network_dir.mkdir(parents=True, exist_ok=True)
             
             result = {
-                'status_message': "⏳ Attack in Progress",
-                'handshake_status': "[yellow]⏳ Trying",
-                'pmkid_status': "[yellow]⏳ Trying",
+                'status_message': "Attack in progress",
+                'handshake_status': "[yellow]Trying",
+                'pmkid_status': "[yellow]Trying",
                 'password': None,
                 'handshake_file': None,
                 'pmkid_file': None
@@ -4128,7 +4288,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             if dump_proc.poll() is not None:
                 stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else "Unknown error"
                 self.logger.error(f"Failed to start airodump-ng for {ssid}: {stderr}")
-                result['status_message'] = "[bold red]✗ Failed to start handshake capture[/]"
+                result['status_message'] = "[error]Failed to start handshake capture [/]"
                 # Continue anyway, we might at least get PMKID
             
             # Start PMKID capture
@@ -4143,7 +4303,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             if pmkid_proc.poll() is not None:
                 stderr = pmkid_proc.stderr.read().decode() if pmkid_proc.stderr else "Unknown error"
                 self.logger.error(f"Failed to start hcxdumptool for {ssid}: {stderr}")
-                result['pmkid_status'] = "[red]✗ Failed to start PMKID capture[/]"
+                result['pmkid_status'] = "[red]Failed to start PMKID capture[/]"
                 # Continue anyway with just handshake capture
             
             # Log attempt details
@@ -4196,9 +4356,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     time_remaining = min_capture_time - elapsed_time
                     minutes_remaining = int(time_remaining // 60)
                     seconds_remaining = int(time_remaining % 60)
-                    result['status_message'] = f"⏳ Attack in Progress - {minutes_remaining:02d}:{seconds_remaining:02d} remaining"
+                    result['status_message'] = f"Attack in progress - {minutes_remaining:02d}:{seconds_remaining:02d} remaining"
                 else:
-                    result['status_message'] = "⏳ Attack in Progress - Finalizing"
+                    result['status_message'] = "Attack in progress - Finalizing"
                 
                 # Check for handshake
                 if not handshake_found:
@@ -4213,12 +4373,12 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                             
                             if is_valid_handshake:
                                 handshake_found = True
-                                result['handshake_status'] = "[green]✓ Captured"
+                                result['handshake_status'] = "[green]Captured"
                                 result['handshake_file'] = str(cap_files[0])
                                 self.logger.info(f"Verified handshake captured for {ssid} after {elapsed_time:.2f} seconds")
                             else:
                                 self.logger.warning(f"Potential handshake found but failed verification for {ssid}")
-                                result['handshake_status'] = "[yellow]⚠️ Needs verification"
+                                result['handshake_status'] = "[yellow]Needs verification"
                 
                 # Check for PMKID
                 if not pmkid_found:
@@ -4231,12 +4391,12 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                             
                             if is_valid_pmkid:
                                 pmkid_found = True
-                                result['pmkid_status'] = "[green]✓ Captured"
+                                result['pmkid_status'] = "[green]Captured"
                                 result['pmkid_file'] = str(pmkid_22000)
                                 self.logger.info(f"Verified PMKID captured for {ssid} after {elapsed_time:.2f} seconds")
                             else:
                                 self.logger.warning(f"Potential PMKID found but failed verification for {ssid}")
-                                result['pmkid_status'] = "[yellow]⚠️ Needs verification"
+                                result['pmkid_status'] = "[yellow]Needs verification"
                 
                 # Send additional deauth packets every 30 seconds if we haven't found anything yet
                 if not handshake_found and not pmkid_found and elapsed_time % 30 < 1 and clients:
@@ -4275,7 +4435,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     if password:
                         password_found = True
                         result['password'] = password
-                        result['status_message'] = "[bold green]✓ Attack Successful - Password Found!"
+                        result['status_message'] = "[success]Attack successful - password found."
                         self.logger.info(f"Password found from handshake for {ssid}: {password}")
             
             # Try PMKID cracking if we have PMKID and no password yet
@@ -4290,21 +4450,21 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     if password:
                         password_found = True
                         result['password'] = password
-                        result['status_message'] = "[bold green]✓ Attack Successful - Password Found!"
+                        result['status_message'] = "[success]Attack successful - password found."
                         self.logger.info(f"Password found from PMKID for {ssid}: {password}")
             
             # If we didn't find the password but found a handshake or PMKID, update status
             if not password_found:
                 if handshake_found or pmkid_found:
-                    result['status_message'] = "[yellow]⚠️ Captured data but couldn't crack password"
+                    result['status_message'] = "[warning]Captured data but could not crack password."
                     
                     # If we have a wordlist, suggest better wordlist
                     if wordlist:
                         result['status_message'] += " - Try larger wordlist"
                 else:
-                    result['status_message'] = "[red]✗ Attack Failed - No handshake or PMKID captured"
-                    result['handshake_status'] = "[red]✗ Failed"
-                    result['pmkid_status'] = "[red]✗ Failed"
+                    result['status_message'] = "[error]Attack failed - no handshake or PMKID captured."
+                    result['handshake_status'] = "[red]Failed"
+                    result['pmkid_status'] = "[red]Failed"
             
             # Log final results
             with open(session_dir / "auto_hack_report.txt", "a") as f:
@@ -4320,9 +4480,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             error_msg = f"Error in _auto_hack_single_network for {network.get('ssid', 'Unknown') if isinstance(network, dict) else 'Unknown'}: {str(e)}"
             self.logger.error(error_msg)
             return {
-                'status_message': f"[bold red]✗ Error: {str(e)}[/]",
-                'handshake_status': "[red]✗ Failed",
-                'pmkid_status': "[red]✗ Failed",
+                'status_message': f"[error]Error: {str(e)}[/]",
+                'handshake_status': "[red]Failed",
+                'pmkid_status': "[red]Failed",
                 'password': None,
                 'handshake_file': None,
                 'pmkid_file': None
@@ -4460,7 +4620,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             return
             
         self.console.print(f"[bold yellow]Starting deauthentication attack on all clients of {network['ssid']}...[/]")
-        self.console.print("[bold red]⚠️ This attack will continue until you press Ctrl+C to stop it! ⚠️[/]")
+        self.console.print("[warning]This attack continues until you press Ctrl+C to stop it.[/]")
         
         # Start time of attack
         start_time = time.time()
@@ -4534,7 +4694,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             
         # Display connected clients
         self.console.print(f"\n[bold yellow]Clients connected to {network['ssid']}:[/]")
-        client_table = Table(show_header=True, header_style="bold magenta")
+        client_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
         client_table.add_column("ID", style="cyan", justify="center")
         client_table.add_column("MAC Address", style="green")
         
@@ -4558,7 +4718,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         packet_count = 0
         
         self.console.print(f"\n[bold yellow]Starting targeted deauthentication attack against client: {selected_client}[/]")
-        self.console.print("[bold red]⚠️ This attack will continue until you press Ctrl+C to stop it! ⚠️[/]")
+        self.console.print("[warning]This attack continues until you press Ctrl+C to stop it.[/]")
         
         try:
             while True:  # Continue until Ctrl+C
@@ -4607,7 +4767,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         # Title and description
         title = Panel(
             "[bold cyan]Network Speed Test[/bold cyan]",
-            border_style="blue",
+            border_style=BORDER_STYLE,
+            box=box.MINIMAL,
             expand=False
         )
         self.console.print(title)
@@ -4625,13 +4786,13 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             )
             
             if test_connection.returncode != 0:
-                self.console.print("[bold red]❌ No internet connection detected![/]")
+                self.console.print("[error]No internet connection detected.[/]")
                 self.console.print("[yellow]Please check your network connection and try again.[/]")
                 self.console.print("\n[bold blue]Press Enter to return to the menu...[/]")
                 input()
                 return
             
-            self.console.print("[bold green]✓ Internet connection detected![/]")
+            self.console.print("[success]Internet connection detected.[/]")
             
             # Start speedtest
             self.console.print("\n[bold blue]Step 2:[/bold blue] Starting Speed Test...")
@@ -4747,10 +4908,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             ping_stats = parse_ping_stats(ping_result.stdout if ping_result.ok else "")
             
             # Show results
-            self.console.print("\n[bold green]✓ Speed Test Completed![/]")
+            self.console.print("\n[success]Speed test completed.[/]")
             
             # Results table
-            result_table = Table(show_header=True, header_style="bold magenta", 
+            result_table = Table(show_header=True, header_style="bold magenta",
+                                box=box.MINIMAL, border_style=BORDER_STYLE,
                                 title="[bold blue]Network Speed Test Results[/]")
             result_table.add_column("Test", style="cyan", justify="center")
             result_table.add_column("Result", style="green", justify="center")
@@ -4759,7 +4921,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             # Download
             download_mbps = mbytes_to_mbits(download_speed)
             result_table.add_row(
-                "📥 Download",
+                "Download",
                 f"{download_mbps:.2f} Mbps",
                 f"({download_speed:.2f} MB/s)"
             )
@@ -4767,7 +4929,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             # Upload
             upload_mbps = mbytes_to_mbits(upload_speed)
             result_table.add_row(
-                "📤 Upload",
+                "Upload",
                 f"{upload_mbps:.2f} Mbps",
                 f"({upload_speed:.2f} MB/s)"
             )
@@ -4775,13 +4937,13 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             # Ping
             if ping_stats:
                 result_table.add_row(
-                    "🔄 Ping",
+                    "Ping",
                     f"{ping_stats.average_ms:.2f} ms",
                     f"min/avg/max = {ping_stats.raw} ms"
                 )
             else:
                 result_table.add_row(
-                    "🔄 Ping",
+                    "Ping",
                     "N/A",
                     "Could not measure ping"
                 )
@@ -4793,14 +4955,14 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             
             # Download speed gauge
             download_blocks = speed_gauge_blocks(download_mbps, 100)
-            download_gauge = f"Download: [green]{'█' * download_blocks}{'░' * (10 - download_blocks)}[/] {download_mbps:.2f} Mbps"
+            download_gauge = f"Download: [green]{'#' * download_blocks}{'.' * (10 - download_blocks)}[/] {download_mbps:.2f} Mbps"
             download_rating = download_speed_rating(download_mbps)
                 
             self.console.print(f"{download_gauge} - {download_rating}")
             
             # Upload speed gauge
             upload_blocks = speed_gauge_blocks(upload_mbps, 50)
-            upload_gauge = f"Upload:   [blue]{'█' * upload_blocks}{'░' * (10 - upload_blocks)}[/] {upload_mbps:.2f} Mbps"
+            upload_gauge = f"Upload:   [blue]{'#' * upload_blocks}{'.' * (10 - upload_blocks)}[/] {upload_mbps:.2f} Mbps"
             upload_rating = upload_speed_rating(upload_mbps)
                 
             self.console.print(f"{upload_gauge} - {upload_rating}")
@@ -4817,7 +4979,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 for rec in recommendations:
                     self.console.print(f"[yellow]- {rec}[/]")
             else:
-                self.console.print("\n[bold green]✓ Your internet connection is performing well![/]")
+                self.console.print("\n[success]Your internet connection is performing well.[/]")
                 
         except Exception as e:
             self.console.print(f"[bold red]Error during speed test: {str(e)}[/]")
@@ -5182,7 +5344,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             self.console.clear()
             warning_panel = Panel(
                 Group(
-                    Text("⚠️ Man-in-the-Middle Attack Warning ⚠️", justify="center"),
+                    Text("Man-in-the-Middle Attack Warning", justify="center"),
                     Text(""),
                     Text("- This attack intercepts network traffic between clients and the gateway"),
                     Text("- All data passing through the network will be captured and analyzed"),
@@ -5195,7 +5357,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     Text("Press ENTER to continue or CTRL+C to cancel", justify="center")
                 ),
                 title="[bold white]WiFiAngel - MITM Attack Module[/]",
-                border_style="yellow"
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(warning_panel)
@@ -5247,7 +5410,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     Text("Enter the interface number or 0 to cancel:", justify="center")
                 ),
                 title="Available Network Interfaces",
-                border_style="blue"
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(interface_panel)
@@ -5319,7 +5483,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     Text("Enter target number or 0 to cancel:", justify="center")
                 ),
                 title="[bold white]Available Targets[/]",
-                border_style="green"
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(target_panel)
@@ -5353,7 +5518,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     Text("Press ENTER to start or CTRL+C to cancel", justify="center")
                 ),
                 title="[bold white]Attack Confirmation[/]",
-                border_style="yellow"
+                border_style=BORDER_STYLE,
+                box=box.MINIMAL,
             )
             
             self.console.print(confirm_panel)
@@ -5538,7 +5704,7 @@ arp.spoof on"""
                         while True:
                             # Check if BetterCAP process is still running
                             if bettercap_process.poll() is not None:
-                                layout["body"].update(Panel("[bold red]BetterCAP unexpectedly stopped! Attack terminated.[/]"))
+                                layout["body"].update(Panel("[bold red]BetterCAP unexpectedly stopped! Attack terminated.[/]", border_style=BORDER_STYLE, box=box.MINIMAL))
                                 live.refresh()
                                 time.sleep(2)
                                 break
@@ -5615,12 +5781,13 @@ arp.spoof on"""
                                 f"[bold red]Man in the Middle Attack Running[/] - [bold cyan]Elapsed: {elapsed_str}[/] - [bold yellow]Target: {target_desc}[/]",
                                 title="[bold white]WiFiAngel MITM Monitor[/]", 
                                 subtitle="[bold red]Press Ctrl+C to Stop[/]",
-                                border_style="red"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["header"].update(header)
                             
                             # 2. Update Status Panel
-                            status_data = Table(show_header=False, box=box.SIMPLE)
+                            status_data = Table(show_header=False, box=box.MINIMAL, border_style=BORDER_STYLE)
                             status_data.add_column("Property", style="cyan", justify="right", width=12)
                             status_data.add_column("Value", style="green")
                             
@@ -5634,12 +5801,13 @@ arp.spoof on"""
                             status_panel = Panel(
                                 status_data,
                                 title="[bold blue]Attack Status[/]",
-                                border_style="blue"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["status"].update(status_panel)
                             
                             # 3. Update Network Traffic Panel
-                            traffic_table = Table(box=box.SIMPLE, show_header=True)
+                            traffic_table = Table(box=box.MINIMAL, border_style=BORDER_STYLE, show_header=True)
                             traffic_table.add_column("#", style="dim", width=3)
                             traffic_table.add_column("Traffic", style="green")
                             
@@ -5652,12 +5820,13 @@ arp.spoof on"""
                             traffic_panel = Panel(
                                 traffic_table,
                                 title=f"[bold green]Live Network Traffic[/]",
-                                border_style="green"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["network_traffic"].update(traffic_panel)
                             
                             # 4. Update Sensitive Data Panel
-                            sensitive_table = Table(box=box.SIMPLE, show_header=True)
+                            sensitive_table = Table(box=box.MINIMAL, border_style=BORDER_STYLE, show_header=True)
                             sensitive_table.add_column("#", style="dim", width=3)
                             sensitive_table.add_column("Sensitive Data Match", style="red")
                             
@@ -5670,12 +5839,13 @@ arp.spoof on"""
                             sensitive_panel = Panel(
                                 sensitive_table,
                                 title=f"[bold red]Sensitive Data Matches[/]",
-                                border_style="red"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["sensitive_data"].update(sensitive_panel)
                             
                             # 5. Update Stats Panel
-                            stats_table = Table(show_header=True, box=box.SIMPLE)
+                            stats_table = Table(show_header=True, box=box.MINIMAL, border_style=BORDER_STYLE)
                             stats_table.add_column("Metric", style="cyan")
                             stats_table.add_column("Value", style="green", justify="right")
                             
@@ -5687,12 +5857,13 @@ arp.spoof on"""
                             stats_panel = Panel(
                                 stats_table,
                                 title="[bold magenta]Attack Statistics[/]",
-                                border_style="magenta"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["stats"].update(stats_panel)
                             
                             # 6. Update Clients Panel - Daha fazla alan kullanacak şekilde güncellendi
-                            clients_table = Table(show_header=True, box=box.SIMPLE)
+                            clients_table = Table(show_header=True, box=box.MINIMAL, border_style=BORDER_STYLE)
                             clients_table.add_column("IP", style="cyan")
                             clients_table.add_column("MAC", style="green", no_wrap=True)
                             clients_table.add_column("Hostname", style="blue")
@@ -5717,14 +5888,16 @@ arp.spoof on"""
                             clients_panel = Panel(
                                 clients_table,
                                 title=f"[bold cyan]Detected Clients[/]",
-                                border_style="cyan"
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["clients"].update(clients_panel)
                             
                             # 7. Update Footer
                             footer = Panel(
-                                "[bold white on red]⚠️ EDUCATIONAL USE ONLY - Press Ctrl+C to stop attack - Unauthorized use is ILLEGAL ⚠️[/]",
-                                border_style="red"
+                                "[bold white on red]EDUCATIONAL USE ONLY - Press Ctrl+C to stop attack - Unauthorized use is ILLEGAL[/]",
+                                border_style=BORDER_STYLE,
+                                box=box.MINIMAL,
                             )
                             layout["footer"].update(footer)
                             

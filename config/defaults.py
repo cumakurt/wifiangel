@@ -6,6 +6,8 @@ from pathlib import Path
 
 
 CHANNELS_2GHZ = tuple(range(1, 14))
+# Busy 2.4 GHz channels first for faster useful results while hopping.
+CHANNELS_2GHZ_SCAN_ORDER = (1, 6, 11, 2, 7, 3, 8, 4, 9, 5, 10, 12, 13)
 CHANNELS_5GHZ = (
     36,
     40,

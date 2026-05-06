@@ -6,6 +6,7 @@ from attacks.commands import (
     aircrack_check,
     aircrack_crack,
     airodump_capture,
+    airodump_network_discovery,
     hashcat_crack,
     hcxdumptool_capture,
     hcxpcapngtool_convert,
@@ -14,6 +15,24 @@ from attacks.commands import (
 
 
 class AttackCommandTests(unittest.TestCase):
+    def test_airodump_network_discovery(self):
+        self.assertEqual(
+            airodump_network_discovery("wlan0mon", Path("/tmp/wa_out")),
+            [
+                "airodump-ng",
+                "-w",
+                "/tmp/wa_out",
+                "--output-format",
+                "csv",
+                "--write-interval",
+                "1",
+                "--band",
+                "abg",
+                "--wps",
+                "wlan0mon",
+            ],
+        )
+
     def test_airodump_capture_command(self):
         self.assertEqual(
             airodump_capture("wlan0mon", channel=6, bssid="aa:bb:cc:dd:ee:ff", output_prefix=Path("out/cap")),

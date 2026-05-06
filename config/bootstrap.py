@@ -14,7 +14,7 @@ from .defaults import OPTIONAL_SYSTEM_TOOLS, REQUIRED_SYSTEM_TOOLS, RUNTIME_DIRS
 
 def check_root(console: Console) -> None:
     if os.geteuid() != 0:
-        console.print("[bold red]❌ Root privileges are required to run this application!")
+        console.print("[bold red]Root privileges are required to run this application.")
         console.print("[yellow]Please run with 'sudo'.[/]")
         sys.exit(1)
 
@@ -22,7 +22,7 @@ def check_root(console: Console) -> None:
 def check_os(console: Console) -> None:
     os_name = system_platform.system().lower()
     if os_name != "linux":
-        console.print("[bold red]❌ This application only runs on Linux operating systems!")
+        console.print("[bold red]This application only runs on Linux operating systems.")
         console.print(f"[yellow]Detected operating system: {system_platform.system()}[/]")
         sys.exit(1)
 
@@ -35,7 +35,7 @@ def check_os(console: Console) -> None:
                 and "ubuntu" not in os_info.lower()
             ):
                 console.print(
-                    "[bold yellow]⚠️ Warning: This application has been tested on Kali Linux. "
+                    "[bold yellow]Warning: This application has been tested on Kali Linux. "
                     "Unexpected issues may occur on other Linux distributions.[/]"
                 )
     except OSError:
@@ -51,7 +51,7 @@ def check_required_packages(console: Console) -> None:
                 break
 
     if missing_packages:
-        console.print("[bold red]❌ Missing packages:[/]")
+        console.print("[bold red]Missing packages:[/]")
         for pkg in missing_packages:
             console.print(f"   - {pkg}")
 
@@ -74,6 +74,6 @@ def warn_optional_missing_tools(console: Console) -> None:
             missing.append(package)
     if not missing:
         return
-    console.print("[bold yellow]⚠️ Some optional tools are missing (certain features may be limited):[/]")
+    console.print("[bold yellow]Some optional tools are missing (certain features may be limited):[/]")
     for pkg in missing:
         console.print(f"   - {pkg}")

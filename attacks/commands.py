@@ -64,6 +64,28 @@ def hcxdumptool_capture(interface: str, output_file: PathLike, channel: Optional
     return command
 
 
+def airodump_network_discovery(
+    interface: str,
+    output_prefix: PathLike,
+    *,
+    write_interval: int = 1,
+) -> List[str]:
+    """Passive scan: channel hop 2.4 + 5 GHz, write CSV for parsers."""
+    return [
+        "airodump-ng",
+        "-w",
+        str(output_prefix),
+        "--output-format",
+        "csv",
+        "--write-interval",
+        str(write_interval),
+        "--band",
+        "abg",
+        "--wps",
+        interface,
+    ]
+
+
 def airodump_capture(
     interface: str,
     *,

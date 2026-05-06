@@ -10,6 +10,7 @@ from .bootstrap import (
 from .defaults import (
     AUTO_HACK_SESSIONS_DIR,
     CHANNELS_2GHZ,
+    CHANNELS_2GHZ_SCAN_ORDER,
     CHANNELS_5GHZ,
     DEFAULT_WORDLIST,
     HANDSHAKE_DIR,
@@ -25,6 +26,7 @@ from .defaults import (
 __all__ = [
     "AUTO_HACK_SESSIONS_DIR",
     "CHANNELS_2GHZ",
+    "CHANNELS_2GHZ_SCAN_ORDER",
     "CHANNELS_5GHZ",
     "DEFAULT_WORDLIST",
     "HANDSHAKE_DIR",
