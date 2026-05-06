@@ -57,6 +57,14 @@ Index number of target network ?
             "WifiPassword99",
         )
 
+    def test_extract_hashcat_password_for_bssid_keeps_colons_in_password(self):
+        output = "aabbccddeeff:112233445566:TestNet:Strong:Pass:2026"
+
+        self.assertEqual(
+            extract_hashcat_password_for_bssid(output, "AA:BB:CC:DD:EE:FF"),
+            "Strong:Pass:2026",
+        )
+
     def test_invalid_password_filters_status_text(self):
         self.assertFalse(is_valid_wifi_password("00:00:05"))
         self.assertFalse(is_valid_wifi_password("10 seconds"))

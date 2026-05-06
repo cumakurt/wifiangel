@@ -84,12 +84,27 @@ def extract_hashcat_password_for_bssid(output: str, bssid: str) -> Optional[str]
         lower = stripped.lower()
         if not stripped or (bssid.lower() not in lower and bssid_plain not in lower):
             continue
-        if ":" not in stripped:
-            continue
-        password = stripped.split(":")[-1].strip()
+        password = _extract_hashcat_line_password(stripped)
         if is_valid_wifi_password(password):
             return password
     return None
+
+
+def _extract_hashcat_line_password(line: str) -> str:
+    """Extract password from hashcat line while keeping ':' inside password."""
+    if ":" not in line:
+        return ""
+
+    # Hashcat often emits:
+    # - 3-field: <bssid_plain>:<handshake_or_client>:<password>
+    # - 4-field: <bssid_plain>:<client_or_hash>:<essid>:<password>
+    # Password may itself contain ':', so limit splitting.
+    parts = line.split(":", 3)
+    if len(parts) >= 4:
+        return parts[3].strip()
+    if len(parts) == 3:
+        return parts[2].strip()
+    return ""
 
 
 def is_valid_wifi_password(password: str) -> bool:

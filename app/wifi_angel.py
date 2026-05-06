@@ -914,7 +914,7 @@ class WiFiAngel:
                 try:
                     process.terminate()
                     process.wait(timeout=2)
-                except:
+                except Exception:
                     process.kill()
                 
             if pmkid_found:
@@ -1339,9 +1339,9 @@ class WiFiAngel:
                         process.kill()
                         try:
                             process.wait(timeout=2)
-                        except:
+                        except Exception:
                             pass
-                except:
+                except Exception:
                     pass
             
             # Also make sure to kill any remaining aircrack-ng or hashcat processes
@@ -1352,7 +1352,7 @@ class WiFiAngel:
                 else:
                     subprocess.run(["pkill", "-9", "-f", "aircrack-ng"], 
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
+            except Exception:
                 pass
 
     def hybrid_attack(self):
@@ -1538,13 +1538,13 @@ class WiFiAngel:
                 try:
                     dump_proc.terminate()
                     dump_proc.wait(timeout=2)
-                except:
+                except Exception:
                     dump_proc.kill()
             if pmkid_proc:
                 try:
                     pmkid_proc.terminate()
                     pmkid_proc.wait(timeout=2)
-                except:
+                except Exception:
                     pmkid_proc.kill()
             
             # Clean temporary files
@@ -1552,7 +1552,7 @@ class WiFiAngel:
                 for f in handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*{ext}"):
                     try:
                         f.unlink()
-                    except:
+                    except Exception:
                         pass
             
             # Show final results
@@ -2194,19 +2194,19 @@ class WiFiAngel:
                     # SSID validation
                     try:
                         validated_network['ssid'] = str(network.get('ssid', 'Unknown'))
-                    except:
+                    except Exception:
                         validated_network['ssid'] = 'Unknown'
                     
                     # Channel validation
                     try:
                         validated_network['channel'] = int(network.get('channel', 1))
-                    except:
+                    except (TypeError, ValueError):
                         validated_network['channel'] = 1
                     
                     # Cipher validation
                     try:
                         validated_network['cipher'] = str(network.get('cipher', 'Unknown'))
-                    except:
+                    except Exception:
                         validated_network['cipher'] = 'Unknown'
                     
                     # Clients validation
@@ -2215,13 +2215,13 @@ class WiFiAngel:
                         if not isinstance(clients, set):
                             clients = set(clients) if clients else set()
                         validated_network['clients'] = clients
-                    except:
+                    except Exception:
                         validated_network['clients'] = set()
                     
                     # Signal validation
                     try:
                         validated_network['signal'] = int(network.get('signal', 0))
-                    except:
+                    except (TypeError, ValueError):
                         validated_network['signal'] = 0
                     
                     # Only include networks with clients
@@ -3194,7 +3194,7 @@ class WiFiAngel:
             # Save WiFi connection info if available
             try:
                 original_settings['wifi_connections'] = subprocess.check_output(["nmcli", "-t", "-f", "NAME,UUID,TYPE", "connection", "show"]).decode()
-            except:
+            except Exception:
                 original_settings['wifi_connections'] = ""
 
             # Get network info
@@ -3220,7 +3220,7 @@ class WiFiAngel:
                 if channel < 1 or channel > 11:
                     self.console.print("[bold yellow]Invalid channel, using default channel 1[/]")
                     channel = 1
-            except:
+            except (TypeError, ValueError):
                 self.console.print("[bold yellow]Invalid channel, using default channel 1[/]")
                 channel = 1
         
@@ -4721,11 +4721,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 try:
                     dump_proc.terminate()
                     dump_proc.wait(timeout=2)
-                except:
+                except Exception:
                     try:
                         dump_proc.kill()
                         dump_proc.wait(timeout=1)
-                    except:
+                    except Exception:
                         pass
                     
             if pmkid_proc:
@@ -4738,14 +4738,14 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         pmkid_proc.kill()   # SIGKILL
                         try:
                             pmkid_proc.wait(timeout=2)
-                        except:
+                        except Exception:
                             pass
-                except:
+                except Exception:
                     # As a last resort, use pkill directly
                     try:
                         subprocess.run(["pkill", "-9", "-f", f"hcxdumptool.*{self.selected_network}"], 
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except:
+                    except Exception:
                         pass
             
             # Clean temporary files
@@ -4753,7 +4753,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 for f in handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*{ext}"):
                     try:
                         f.unlink()
-                    except:
+                    except Exception:
                         pass
             
             security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
@@ -5059,11 +5059,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 try:
                     dump_proc.terminate()
                     dump_proc.wait(timeout=1)
-                except:
+                except Exception:
                     try:
                         dump_proc.kill()
                         dump_proc.wait(timeout=1)
-                    except:
+                    except Exception:
                         pass
                     
             if pmkid_proc:
@@ -5076,14 +5076,14 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         pmkid_proc.kill()   # SIGKILL
                         try:
                             pmkid_proc.wait(timeout=2)
-                        except:
+                        except Exception:
                             pass
-                except:
+                except Exception:
                     # As a last resort, use pkill directly
                     try:
                         subprocess.run(["pkill", "-9", "-f", f"hcxdumptool.*{bssid}"], 
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except:
+                    except Exception:
                         pass
 
     def _auto_hack_cleanup(self):
@@ -5146,7 +5146,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 subprocess.run(["pkill", "-9", "-f", "air"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["pkill", "-9", "-f", "hcx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["pkill", "-9", "-f", "hashcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except:
+            except Exception:
                 pass
 
     def _kill_processes(self, process_names):
@@ -5169,7 +5169,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         # Clean up zombie processes
         try:
             subprocess.run(["pkill", "-9", "-f", "defunct"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except:
+        except Exception:
             pass
 
     def deauth_all_clients(self):
