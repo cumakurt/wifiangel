@@ -35,6 +35,7 @@ import netifaces
 import nmap
 from bleak import BleakScanner
 from rich import box
+from rich.align import Align
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
@@ -1921,29 +1922,49 @@ class WiFiAngel:
             )
             scan_thread.start()
             
-            # Wait for initial scan results without using a progress bar
             scan_time = 60  # 60 seconds scan time
             scan_start_time = time.time()
-            
-            # Simple countdown with network stats
-            for remaining_time in range(scan_time, 0, -1):
-                minutes = remaining_time // 60
-                seconds = remaining_time % 60
-                
+
+            def _auto_hack_scan_panel(remaining_sec: int) -> Panel:
+                done = scan_time - remaining_sec
+                progress_percent = min(100, int(done / scan_time * 100))
+                filled = min(20, progress_percent // 5)
+                bar_gfx = "█" * filled + "░" * (20 - filled)
                 network_count = len(self.networks)
-                clients_count = sum(len(network['clients']) for network in self.networks.values())
-                
-                # Calculate progress percent
-                progress_percent = int(((scan_time - remaining_time) / scan_time) * 100)
-                progress_bar = f"[{'=' * (progress_percent // 5)}{' ' * (20 - (progress_percent // 5))}]"
-                
-                # Clear previous line and print updated status
-                self.console.print(f"\r[cyan]{progress_bar} {progress_percent}% - Networks: {network_count} | Clients: {clients_count} | Remaining: {minutes:02d}:{seconds:02d}[/]", end="")
-                
-                time.sleep(1)
-            
-            # Print a newline to finish the progress display
-            self.console.print("")
+                clients_count = sum(len(n["clients"]) for n in self.networks.values())
+                minutes = remaining_sec // 60
+                seconds = remaining_sec % 60
+                return Panel(
+                    Group(
+                        Text(bar_gfx, style="cyan"),
+                        Text.assemble(
+                            ("  ", ""),
+                            (f"{progress_percent}%", "bold cyan"),
+                            ("   networks ", "dim"),
+                            (str(network_count), "green bold"),
+                            ("   clients ", "dim"),
+                            (str(clients_count), "yellow bold"),
+                            ("   time left ", "dim"),
+                            (f"{minutes:02d}:{seconds:02d}", "bold white"),
+                        ),
+                    ),
+                    title="[bold]Step 2 · Airodump-ng discovery[/]",
+                    subtitle="[dim]60s passive scan (same as main menu)[/]",
+                    border_style=BORDER_STYLE,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+
+            # Rich Console does not reliably update a single line via carriage return; use Live in place
+            with Live(
+                _auto_hack_scan_panel(scan_time),
+                console=self.console,
+                refresh_per_second=10,
+                transient=True,
+            ) as scan_live:
+                for remaining_time in range(scan_time, 0, -1):
+                    scan_live.update(_auto_hack_scan_panel(remaining_time))
+                    time.sleep(1)
             
             # Scan is completed
             scan_duration = time.time() - scan_start_time
@@ -2266,84 +2287,129 @@ class WiFiAngel:
             max_parallel_attacks = min(4, len(networks_with_clients))  # Up to 4 parallel attacks
             self.console.print(f"[bold blue]4. Starting Parallel Attacks on {len(networks_with_clients)} networks (max {max_parallel_attacks} at once)...[/]")
             
-            # Process networks in chunks for parallel execution
-            attack_results = []
-            
-            # Add progress bar for tracking attack progress
-            progress = Progress(
-                "[progress.description]{task.description}",
-                BarColumn(),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                TimeRemainingColumn(),
-                console=self.console
-            )
-            
-            # Start progress display
-            with progress:
-                task = progress.add_task("[cyan]Processing networks...", total=len(networks_with_clients))
-                
-                # Create thread pool
-                executor = ThreadPoolExecutor(max_workers=max_parallel_attacks)
-                future_to_network = {}
-                
-                try:
-                    # Submit all tasks
-                    for bssid, validated_net in networks_with_clients:
-                        future = executor.submit(self._auto_hack_single_network, bssid, validated_net, session_dir, wordlist)
-                        future_to_network[future] = (bssid, validated_net)
-                    
-                    # Process completed tasks and update progress
-                    for future in concurrent.futures.as_completed(future_to_network):
-                        bssid, network = future_to_network[future]
-                        try:
-                            result = future.result()
-                            attack_results.append((bssid, network, result))
-                            
-                            # Update table
-                            results_table.add_row(
-                                network['ssid'],
-                                result['status_message'],
-                                result['handshake_status'],
-                                result['pmkid_status'],
-                                result['password'] if result['password'] else ""
+            # Process networks in parallel; rich Progress only advanced on completion, so long
+            # captures looked "stuck" at 0%. Use Live + worker heartbeats instead.
+            attack_results: list = []
+            attack_progress = {"lock": threading.Lock(), "active": {}}
+            total_nets = len(networks_with_clients)
+
+            def _render_step4_live() -> Panel:
+                finished = len(attack_results)
+                rows: list = []
+                with attack_progress["lock"]:
+                    for _bid, st in sorted(
+                        attack_progress["active"].items(),
+                        key=lambda x: x[1]["ssid"].lower(),
+                    ):
+                        rows.append(
+                            Text.assemble(
+                                ("  * ", "dim"),
+                                (st["ssid"], "bold cyan"),
+                                ("  ", ""),
+                                (st["detail"], ""),
+                                ("  ", "dim"),
+                                (f"{st['elapsed']}s", "yellow"),
                             )
-                        except Exception as e:
-                            self.logger.error(f"Error during auto hack of {network['ssid']}: {str(e)}")
-                            result = {
-                                'status_message': f"[error]Error: {str(e)}[/]",
-                                'handshake_status': "[red]Failed",
-                                'pmkid_status': "[red]Failed",
-                                'password': None,
-                                'handshake_file': None,
-                                'pmkid_file': None
-                            }
-                            attack_results.append((bssid, network, result))
-                            results_table.add_row(
-                                network['ssid'],
-                                result['status_message'],
-                                result['handshake_status'],
-                                result['pmkid_status'],
-                                ""
-                            )
-                        
-                        # Update progress for each completed network regardless of success or failure
-                        progress.update(task, advance=1, description=f"[cyan]Processed {network['ssid']}")
-                
-                except KeyboardInterrupt:
-                    self.console.print("\n[warning]Auto Hack stopped by user.[/]")
-                    self.logger.warning("Auto Hack stopped by user")
-                    # Cancel all running futures
-                    for future in future_to_network:
-                        future.cancel()
-                    # Shutdown executor immediately
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    self.scanning = False
-                    self._auto_hack_cleanup()
-                    self.current_menu = "main"
-                    return
-                finally:
-                    # Ensure executor is properly shutdown
-                    executor.shutdown(wait=False, cancel_futures=True)
+                        )
+                parts = [
+                    Text.assemble(
+                        ("Finished ", "bold"),
+                        (f"{finished}/{total_nets}", "green bold"),
+                        ("  ", ""),
+                        ("|  ", "dim"),
+                        (
+                            "Each network capture typically runs ~3-5 minutes before this step advances.",
+                            "dim",
+                        ),
+                    )
+                ]
+                if rows:
+                    parts.append(Group(*rows))
+                else:
+                    parts.append(Text("  Starting workers...", style="dim"))
+                return Panel(
+                    Group(*parts),
+                    title="[bold]Step 4 · Parallel attacks[/]",
+                    subtitle="[dim]Live status from capture loop (not stuck at 0%)[/]",
+                    border_style=BORDER_STYLE,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+
+            executor = ThreadPoolExecutor(max_workers=max_parallel_attacks)
+            future_to_network = {}
+            try:
+                for bssid, validated_net in networks_with_clients:
+                    future = executor.submit(
+                        self._auto_hack_single_network,
+                        bssid,
+                        validated_net,
+                        session_dir,
+                        wordlist,
+                        attack_progress,
+                    )
+                    future_to_network[future] = (bssid, validated_net)
+
+                pending = set(future_to_network.keys())
+                with Live(
+                    _render_step4_live(),
+                    console=self.console,
+                    refresh_per_second=4,
+                    transient=True,
+                ) as live:
+                    while pending:
+                        done, pending = concurrent.futures.wait(
+                            pending,
+                            timeout=0.25,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for future in done:
+                            bssid, network = future_to_network[future]
+                            try:
+                                result = future.result()
+                                attack_results.append((bssid, network, result))
+
+                                results_table.add_row(
+                                    network["ssid"],
+                                    result["status_message"],
+                                    result["handshake_status"],
+                                    result["pmkid_status"],
+                                    result["password"] if result["password"] else "",
+                                )
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Error during auto hack of {network['ssid']}: {str(e)}"
+                                )
+                                result = {
+                                    "status_message": f"[error]Error: {str(e)}[/]",
+                                    "handshake_status": "[red]Failed",
+                                    "pmkid_status": "[red]Failed",
+                                    "password": None,
+                                    "handshake_file": None,
+                                    "pmkid_file": None,
+                                }
+                                attack_results.append((bssid, network, result))
+                                results_table.add_row(
+                                    network["ssid"],
+                                    result["status_message"],
+                                    result["handshake_status"],
+                                    result["pmkid_status"],
+                                    "",
+                                )
+                        live.update(_render_step4_live())
+
+            except KeyboardInterrupt:
+                self.console.print("\n[warning]Auto Hack stopped by user.[/]")
+                self.logger.warning("Auto Hack stopped by user")
+                for future in future_to_network:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                self.scanning = False
+                self._auto_hack_cleanup()
+                self.current_menu = "main"
+                return
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
             
             # Display final results
             self.console.print("\n")
@@ -4695,7 +4761,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             # Ensure menu state is properly reset
             self.current_menu = "attack"
 
-    def _auto_hack_single_network(self, bssid, network, session_dir, wordlist):
+    def _auto_hack_single_network(self, bssid, network, session_dir, wordlist, attack_progress=None):
         """Helper function for auto_hack to attack a single network in parallel"""
         dump_proc = None
         pmkid_proc = None
@@ -4723,7 +4789,17 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 
             cipher = str(network.get('cipher', 'Unknown'))
             
-            # Log start of attack
+            def _report_attack(elapsed: float = 0, detail: str = "") -> None:
+                if attack_progress is None:
+                    return
+                with attack_progress["lock"]:
+                    attack_progress["active"][bssid] = {
+                        "ssid": ssid,
+                        "elapsed": int(elapsed),
+                        "detail": (detail or "")[:72],
+                    }
+
+            _report_attack(0, "Starting capture (airodump + hcxdumptool)")
             self.logger.info(f"Starting attack on {ssid} ({bssid})")
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -4788,24 +4864,33 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 f.write(f"  Clients: {len(clients)}\n")
                 f.write(f"  Client MACs: {', '.join(clients) if clients else 'None'}\n")
 
-            # IMPROVED: Send deauth packets to all clients simultaneously (up to 10)
-            with ThreadPoolExecutor(max_workers=min(10, len(clients))) as deauth_executor:
-                deauth_tasks = []
-                
-                for client in clients:
-                    deauth_tasks.append(deauth_executor.submit(
-                        subprocess.run,
-                        aireplay_deauth(self.interface_name, bssid=bssid, count=5, client=client),
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        timeout=10  # Add 10 second timeout
-                    ))
-                
-                # Wait for deauth tasks to complete
-                for task in concurrent.futures.as_completed(deauth_tasks):
-                    try:
-                        task.result()  # Just to ensure we catch any exceptions
-                    except Exception as e:
-                        self.logger.error(f"Deauth error for {ssid}: {str(e)}")
+            # Send deauth to known clients (skip if none — avoids ThreadPoolExecutor(max_workers=0))
+            if clients:
+                with ThreadPoolExecutor(max_workers=min(10, len(clients))) as deauth_executor:
+                    deauth_tasks = []
+                    for client in clients:
+                        deauth_tasks.append(
+                            deauth_executor.submit(
+                                subprocess.run,
+                                aireplay_deauth(
+                                    self.interface_name,
+                                    bssid=bssid,
+                                    count=5,
+                                    client=client,
+                                ),
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=10,
+                            )
+                        )
+                    for task in concurrent.futures.as_completed(deauth_tasks):
+                        try:
+                            task.result()
+                        except Exception as e:
+                            self.logger.error(f"Deauth error for {ssid}: {str(e)}")
+                _report_attack(0, "Deauth done; capture phase (typically 3-5 min)")
+            else:
+                _report_attack(0, "No client MACs; capture phase (typically 3-5 min)")
             
             # Modified: Wait for captures with minimum 3 minute (180 seconds) capture time
             # This ensures we give each network enough time for capture
@@ -4892,6 +4977,8 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                     self.logger.info(f"Maximum capture time reached for {ssid}")
                     break
                     
+                _report_attack(elapsed_time, result.get("status_message", ""))
+
                 # Brief wait before next check
                 time.sleep(5)
             
@@ -4900,6 +4987,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             
             # Try to crack if we found anything
             if handshake_found and wordlist:
+                _report_attack(time.time() - capture_start_time, "Cracking handshake (aircrack-ng)")
                 cap_files = list(network_dir.glob(f"{handshake_file.name}*.cap"))
                 if cap_files:
                     self.logger.info(f"Attempting to crack handshake for {ssid}")
@@ -4914,6 +5002,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             
             # Try PMKID cracking if we have PMKID and no password yet
             if not password_found and pmkid_found and wordlist:
+                _report_attack(time.time() - capture_start_time, "Cracking PMKID (hashcat)")
                 if pmkid_22000.exists():
                     self.logger.info(f"Attempting to crack PMKID for {ssid}")
                     hashcat_result = subprocess.run(
@@ -4962,6 +5051,9 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 'pmkid_file': None
             }
         finally:
+            if attack_progress is not None:
+                with attack_progress["lock"]:
+                    attack_progress["active"].pop(bssid, None)
             # Cleanup processes
             if dump_proc:
                 try:
@@ -6154,35 +6246,55 @@ arp.spoof on"""
                     self._restore_settings(original_ip_forward, original_iptables)
                     return
                 
-                self.console.print("\n[bold white on red]!!! IMPORTANT: Press Ctrl+C to stop the attack when finished !!![/]")
-                
-                # Create rich layout for visual display
+                self.console.print("\n[bold white on red]Ctrl+C stops the MITM session when you are done.[/]")
+
+                def _mitm_simplify_traffic_line(raw: str) -> tuple[str, str, str]:
+                    """Return (time, tag, detail) with less BetterCAP module noise."""
+                    s = (raw or "").strip()
+                    if not s:
+                        return ("--", "—", "")
+                    ts = "--"
+                    m_ts = re.match(r"^\[(\d{1,2}:\d{2}:\d{2})\]\s*", s)
+                    if m_ts:
+                        ts = m_ts.group(1)
+                        s = s[m_ts.end():].strip()
+                    tag = "·"
+                    m_mod = re.search(r"\[net\.sniff\.(\w+)\]", s, re.I)
+                    if m_mod:
+                        tag = m_mod.group(1).upper()
+                        s = re.sub(r"\s*\[net\.sniff\.\w+\]\s*", " ", s, count=1).strip()
+                    if tag == "·":
+                        m_svc = re.search(
+                            r"\b(https?\.proxy|http\.proxy|any\.proxy|net\.recon|arp\.spoof|dns\.spoof)\b",
+                            s,
+                            re.I,
+                        )
+                        if m_svc:
+                            tag = m_svc.group(1).replace(".", " ").upper()[:14]
+                    s = re.sub(r"\s+", " ", s)
+                    max_len = 88
+                    if len(s) > max_len:
+                        s = s[: max_len - 1] + "…"
+                    return (ts, tag, s)
+
+                # Create rich layout: traffic left, session + clients right; no duplicate status bands
                 layout = Layout(name="root")
-                
-                # Main sections
-                layout.split(
-                    Layout(name="header", size=3),
-                    Layout(name="body"),
-                    Layout(name="footer", size=3)
+                layout.split_column(
+                    Layout(name="header", size=4),
+                    Layout(name="body", ratio=1),
+                    Layout(name="footer", size=1),
                 )
-                
-                # Body sections - adjust ratio between left and right columns
                 layout["body"].split_row(
-                    Layout(name="left_column", ratio=4),  # More space for left column
-                    Layout(name="right_column", ratio=1)  # Narrow the right column
+                    Layout(name="left_column", ratio=3),
+                    Layout(name="right_column", ratio=2),
                 )
-                
-                # Left column sections - adjust ratios between Traffic section and Sensitive Data
-                layout["left_column"].split(
-                    Layout(name="status", ratio=1),
-                    Layout(name="network_traffic", ratio=4),  # More space for Network Traffic
-                    Layout(name="sensitive_data", ratio=2)
+                layout["left_column"].split_column(
+                    Layout(name="network_traffic", ratio=3),
+                    Layout(name="sensitive_data", ratio=2),
                 )
-                
-                # Right column sections - more space for clients
-                layout["right_column"].split(
-                    Layout(name="stats", ratio=1),
-                    Layout(name="clients", ratio=3)  # More space for Client table
+                layout["right_column"].split_column(
+                    Layout(name="session", ratio=2),
+                    Layout(name="clients", ratio=3),
                 )
                 
                 # Stats for display
@@ -6289,128 +6401,162 @@ arp.spoof on"""
                                 # Silently handle errors
                                 pass
                             
-                            # 1. Update Header
+                            # 1. Header — single compact band (elapsed only here)
                             header = Panel(
-                                f"[bold red]Man in the Middle Attack Running[/] - [bold cyan]Elapsed: {elapsed_str}[/] - [bold yellow]Target: {target_desc}[/]",
-                                title="[bold white]WiFiAngel MITM Monitor[/]", 
-                                subtitle="[bold red]Press Ctrl+C to Stop[/]",
+                                Group(
+                                    Text.assemble(
+                                        ("WiFiAngel MITM", "bold white"),
+                                        ("    ", ""),
+                                        (elapsed_str, "bold cyan"),
+                                        ("  elapsed", "dim cyan"),
+                                        ("  ·  ", "dim"),
+                                        (target_desc, "bold yellow"),
+                                    ),
+                                    Text("Ctrl+C to stop", style="dim red", justify="center"),
+                                ),
                                 border_style=BORDER_STYLE,
                                 box=box.MINIMAL,
+                                padding=(0, 1),
                             )
                             layout["header"].update(header)
-                            
-                            # 2. Update Status Panel
-                            status_data = Table(show_header=False, box=box.MINIMAL, border_style=BORDER_STYLE)
-                            status_data.add_column("Property", style="cyan", justify="right", width=12)
-                            status_data.add_column("Value", style="green")
-                            
-                            status_data.add_row("Interface", f"[bold]{selected_iface}[/]")
-                            status_data.add_row("Local IP", f"[bold]{selected_ip}[/]")
-                            status_data.add_row("Gateway", f"[bold]{selected_gateway}[/]")
-                            status_data.add_row("Status", "[bold green]Active[/]")
-                            status_data.add_row("Mode", "[bold yellow]ARP Spoofing[/]")
-                            status_data.add_row("Target", f"[bold red]{target_desc}[/]")
-                            
-                            status_panel = Panel(
-                                status_data,
-                                title="[bold blue]Attack Status[/]",
-                                border_style=BORDER_STYLE,
+
+                            # 2. Session summary — merged facts (no duplicate clock)
+                            session_tbl = Table(
+                                show_header=False,
                                 box=box.MINIMAL,
-                            )
-                            layout["status"].update(status_panel)
-                            
-                            # 3. Update Network Traffic Panel
-                            traffic_table = Table(box=box.MINIMAL, border_style=BORDER_STYLE, show_header=True)
-                            traffic_table.add_column("#", style="dim", width=3)
-                            traffic_table.add_column("Traffic", style="green")
-                            
-                            if attack_stats['last_traffic']:
-                                for i, line in enumerate(attack_stats['last_traffic']):
-                                    traffic_table.add_row(f"{i+1}", f"{line.strip()}")
-                            else:
-                                traffic_table.add_row("", "[yellow]Waiting for traffic...[/]")
-                                
-                            traffic_panel = Panel(
-                                traffic_table,
-                                title=f"[bold green]Live Network Traffic[/]",
                                 border_style=BORDER_STYLE,
-                                box=box.MINIMAL,
+                                pad_edge=False,
+                                expand=True,
                             )
-                            layout["network_traffic"].update(traffic_panel)
-                            
-                            # 4. Update Sensitive Data Panel
-                            sensitive_table = Table(box=box.MINIMAL, border_style=BORDER_STYLE, show_header=True)
-                            sensitive_table.add_column("#", style="dim", width=3)
-                            sensitive_table.add_column("Sensitive Data Match", style="red")
-                            
-                            if attack_stats['sensitive_matches']:
-                                for i, line in enumerate(attack_stats['sensitive_matches']):
-                                    sensitive_table.add_row(f"{i+1}", f"[bold red]{line.strip()}[/]")
-                            else:
-                                sensitive_table.add_row("", "[yellow]No sensitive data detected yet...[/]")
-                                
-                            sensitive_panel = Panel(
-                                sensitive_table,
-                                title=f"[bold red]Sensitive Data Matches[/]",
-                                border_style=BORDER_STYLE,
-                                box=box.MINIMAL,
-                            )
-                            layout["sensitive_data"].update(sensitive_panel)
-                            
-                            # 5. Update Stats Panel
-                            stats_table = Table(show_header=True, box=box.MINIMAL, border_style=BORDER_STYLE)
-                            stats_table.add_column("Metric", style="cyan")
-                            stats_table.add_column("Value", style="green", justify="right")
-                            
-                            stats_table.add_row("Running Time", elapsed_str)
-                            stats_table.add_row("Packets", f"{attack_stats['packets']:,}")
-                            stats_table.add_row("Data", self._format_bytes(attack_stats['bytes']))
-                            stats_table.add_row("Active Clients", f"{len(attack_stats['clients']):,}")
-                            
-                            stats_panel = Panel(
-                                stats_table,
-                                title="[bold magenta]Attack Statistics[/]",
-                                border_style=BORDER_STYLE,
-                                box=box.MINIMAL,
-                            )
-                            layout["stats"].update(stats_panel)
-                            
-                            # 6. Update Clients Panel - Daha fazla alan kullanacak şekilde güncellendi
-                            clients_table = Table(show_header=True, box=box.MINIMAL, border_style=BORDER_STYLE)
-                            clients_table.add_column("IP", style="cyan")
-                            clients_table.add_column("MAC", style="green", no_wrap=True)
-                            clients_table.add_column("Hostname", style="blue")
-                            
-                            if attack_stats['clients']:
-                                # Show most recent clients first
-                                sorted_clients = sorted(
-                                    attack_stats['clients'].items(), 
-                                    key=lambda x: x[1]['first_seen'], 
-                                    reverse=True
+                            session_tbl.add_column("", style="dim", justify="right", width=14, no_wrap=True)
+                            session_tbl.add_column("", style="white")
+                            session_tbl.add_row("Interface", f"[cyan]{selected_iface}[/]")
+                            session_tbl.add_row("Local IP", f"[green]{selected_ip}[/]")
+                            session_tbl.add_row("Gateway", f"[yellow]{selected_gateway}[/]")
+                            session_tbl.add_row("RX packets", f"{attack_stats['packets']:,}")
+                            session_tbl.add_row("RX data", self._format_bytes(attack_stats["bytes"]))
+                            session_tbl.add_row("ARP clients", f"{len(attack_stats['clients']):,}")
+                            session_tbl.add_row("Mode", "[dim]ARP spoof · sniff[/]")
+
+                            layout["session"].update(
+                                Panel(
+                                    session_tbl,
+                                    title="[bold]Session[/]",
+                                    border_style=BORDER_STYLE,
+                                    box=box.ROUNDED,
+                                    padding=(0, 1),
                                 )
-                                
-                                for ip, data in sorted_clients[:15]:  # Show up to 15 clients (öncekinden daha fazla)
-                                    clients_table.add_row(
-                                        ip, 
-                                        data['mac'], 
-                                        data['hostname'] if 'hostname' in data else "Unknown"
-                                    )
-                            else:
-                                clients_table.add_row("", "[yellow]No clients detected yet[/]", "")
-                                
-                            clients_panel = Panel(
-                                clients_table,
-                                title=f"[bold cyan]Detected Clients[/]",
-                                border_style=BORDER_STYLE,
-                                box=box.MINIMAL,
                             )
-                            layout["clients"].update(clients_panel)
-                            
-                            # 7. Update Footer
-                            footer = Panel(
-                                "[bold white on red]EDUCATIONAL USE ONLY - Press Ctrl+C to stop attack - Unauthorized use is ILLEGAL[/]",
-                                border_style=BORDER_STYLE,
+
+                            # 3. Traffic — parsed columns, less noise
+                            traffic_table = Table(
                                 box=box.MINIMAL,
+                                border_style=BORDER_STYLE,
+                                show_header=True,
+                                header_style="bold dim",
+                                pad_edge=False,
+                                expand=True,
+                            )
+                            traffic_table.add_column("#", style="dim", justify="right", width=3)
+                            traffic_table.add_column("Time", style="dim", width=8, no_wrap=True)
+                            traffic_table.add_column("Tag", style="cyan", width=8, no_wrap=True, overflow="ellipsis")
+                            traffic_table.add_column("Event", style="green")
+
+                            if attack_stats["last_traffic"]:
+                                for i, line in enumerate(attack_stats["last_traffic"][-12:]):
+                                    t, tag, detail = _mitm_simplify_traffic_line(line)
+                                    traffic_table.add_row(str(i + 1), t, tag, detail or "[dim]—[/]")
+                            else:
+                                traffic_table.add_row("", "", "", "[dim]Waiting for traffic…[/]")
+
+                            layout["network_traffic"].update(
+                                Panel(
+                                    traffic_table,
+                                    title="[bold]Live traffic[/]",
+                                    subtitle="[dim]BetterCAP / sniff[/]",
+                                    border_style=BORDER_STYLE,
+                                    box=box.ROUNDED,
+                                    padding=(0, 1),
+                                )
+                            )
+
+                            # 4. Sensitive — compact alerts
+                            sens_tbl = Table(
+                                box=box.MINIMAL,
+                                border_style=BORDER_STYLE,
+                                show_header=True,
+                                header_style="bold dim",
+                                pad_edge=False,
+                                expand=True,
+                            )
+                            sens_tbl.add_column("#", style="dim", width=3, justify="right")
+                            sens_tbl.add_column("Match", style="red")
+
+                            if attack_stats["sensitive_matches"]:
+                                for i, line in enumerate(attack_stats["sensitive_matches"][-8:]):
+                                    s = re.sub(r"\s+", " ", line.strip())
+                                    if len(s) > 96:
+                                        s = s[:95] + "…"
+                                    sens_tbl.add_row(str(i + 1), s)
+                            else:
+                                sens_tbl.add_row("", "[dim]No pattern hits yet (password, token, auth…)[/]")
+
+                            layout["sensitive_data"].update(
+                                Panel(
+                                    sens_tbl,
+                                    title="[bold red]Pattern alerts[/]",
+                                    border_style="red",
+                                    box=box.ROUNDED,
+                                    padding=(0, 1),
+                                )
+                            )
+
+                            # 5. Clients — wider hostname column
+                            clients_table = Table(
+                                show_header=True,
+                                box=box.MINIMAL,
+                                border_style=BORDER_STYLE,
+                                header_style="bold dim",
+                                pad_edge=False,
+                                expand=True,
+                            )
+                            clients_table.add_column("IP", style="cyan", min_width=14, no_wrap=True, overflow="ignore")
+                            clients_table.add_column("MAC", style="dim", min_width=17, no_wrap=True, overflow="ignore")
+                            clients_table.add_column("Host", style="blue", ratio=1, overflow="fold")
+
+                            if attack_stats["clients"]:
+                                sorted_clients = sorted(
+                                    attack_stats["clients"].items(),
+                                    key=lambda x: x[1]["first_seen"],
+                                    reverse=True,
+                                )
+                                for ip, data in sorted_clients[:18]:
+                                    host = data.get("hostname") or "—"
+                                    clients_table.add_row(ip, data["mac"], host)
+                            else:
+                                clients_table.add_row("—", "—", "[dim]No ARP clients yet[/]")
+
+                            layout["clients"].update(
+                                Panel(
+                                    clients_table,
+                                    title="[bold]Clients (ARP)[/]",
+                                    border_style=BORDER_STYLE,
+                                    box=box.ROUNDED,
+                                    padding=(0, 1),
+                                )
+                            )
+
+                            # 6. Footer — thin legal strip
+                            footer = Panel(
+                                Align.center(
+                                    Text(
+                                        "Educational use only  ·  Ctrl+C stops the session  ·  Unauthorized use is illegal",
+                                        style="dim white",
+                                    )
+                                ),
+                                style="on red",
+                                box=box.MINIMAL,
+                                padding=(0, 1),
                             )
                             layout["footer"].update(footer)
                             

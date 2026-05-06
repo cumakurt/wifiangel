@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from config.defaults import LOGS_ROOT
 from reports import generate_security_report
@@ -125,17 +126,17 @@ class Logger:
         }
         self.traffic_logger.info(f"Traffic: {src} -> {dst}", extra=extra)
 
-    def info(self, message: str):
-        self.logger.info(message)
+    def info(self, msg: object, *args: object, **kwargs: Any) -> None:
+        self.logger.info(msg, *args, **kwargs)
 
-    def warning(self, message: str):
-        self.logger.warning(message)
+    def warning(self, msg: object, *args: object, **kwargs: Any) -> None:
+        self.logger.warning(msg, *args, **kwargs)
 
-    def error(self, message: str):
-        self.logger.error(message)
+    def error(self, msg: object, *args: object, **kwargs: Any) -> None:
+        self.logger.error(msg, *args, **kwargs)
 
-    def debug(self, message: str):
-        self.logger.debug(message)
+    def debug(self, msg: object, *args: object, **kwargs: Any) -> None:
+        self.logger.debug(msg, *args, **kwargs)
 
     def generate_report(self) -> Path:
         return generate_security_report(self.log_dir, self.timestamp)
