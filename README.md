@@ -35,11 +35,11 @@ WiFiAngel is an interactive **terminal (TUI)** application for **authorized** wi
 
 ### Attack techniques menu
 
-All attack flows assume a **selected target** where applicable. The app shows legal / lab-oriented warnings before destructive or intrusive actions.
+All attack flows assume a **selected target** where applicable. The app asks for legal-use confirmation once at startup instead of repeating per-module confirmations.
 
 | # | Feature | Summary |
 |---|---------|---------|
-| **1** | **WPA / WPA2 / WPA3 handshake capture** | `airodump-ng` capture on the target BSSID/channel, deauthentication to provoke handshakes, optional verification with `aircrack-ng`, saving captures under `handshake/`. |
+| **1** | **WPA / WPA2 / WPA3 handshake capture** | Advanced capture engine: `airodump-ng` plus optional `hcxdumptool` PMKID source, PMF/WPA3-aware deauthentication strategy, client prioritization, frame-level EAPOL replay scoring, live quality telemetry, best-artifact promotion, manifest JSON, optional `.22000` export, and hashcat job queue integration. |
 | **2** | **Deauthentication** | Submenu: broadcast deauth to all associated clients, or targeted deauth to one client MAC (`aireplay-ng`). |
 | **3** | **PMKID capture** | `hcxdumptool` capture to `pcapng`, conversion with **`hcxpcapngtool`** to **22000** hash format, optional PMKID verification helpers. |
 | **4** | **Dictionary attack** | Run **`aircrack-ng`** (or related flow) against a captured handshake using a wordlist (defaults under `config/defaults.py`). |
@@ -62,18 +62,18 @@ All attack flows assume a **selected target** where applicable. The app shows le
 | **8** | **Hidden SSID discovery** | Workflows to infer or surface hidden SSIDs where frames allow. |
 | **9** | **Bluetooth and IoT scan** | **`bleak`**-based BLE discovery (requires Python dependency); lists nearby BLE devices when available. |
 | **10** | **Network speed test** | Upload/download probes via **`curl`** (or configured runners), with formatted throughput and simple recommendations. |
+| **11** | **Technical intelligence** | Capture quality scoring, EAPOL replay checks, 802.11 frame intelligence, adaptive channel planning, artifact indexing, hashcat job metadata, PMF/WPA3 compatibility hints, target client profiling, interface capability profiling, and live packet-rate telemetry. |
 
-### Auto Hack workflow
+### Automated assessment workflow
 
-Automated **lab-style** pipeline (with disclaimers and confirmations):
+Automated **lab-style** pipeline. Legal-use confirmation is requested once at startup; runtime modules do not repeat legal disclaimers or authorization prompts.
 
-1. **Legal disclaimer** and optional **3-minute confirmation** window before attacks.
-2. **Monitor mode** via the same adapter path as the main menu (`WiFiAdapterManager`).
-3. **Discovery** — **60 seconds** of **`airodump-ng`** (same backend as menu scan, optional `live_table=False` so the countdown **Live** panel does not fight the Rich console).
-4. **Prioritization** — scores networks (clients, signal, cipher family, WPS, etc.) and shows a **prioritized table**.
-5. **User selection** — comma-separated indices or `all`; another timed confirmation.
-6. **Parallel attacks** — only networks **with observed clients**; per-network worker runs **airodump** + **hcxdumptool**, **deauth** bursts, **3–5 minute** capture window (configurable in code), then **`aircrack-ng`** / **`hashcat`** as appropriate. **Live** status panel shows **per-target heartbeat** so long captures do not look “stuck at 0%”.
-7. **Results table** and summary statistics; artifacts under **`auto_hack_sessions/<timestamp>/`** and log append to the session report.
+1. **Monitor mode** via the same adapter path as the main menu (`WiFiAdapterManager`).
+2. **Discovery** — **60 seconds** of **`airodump-ng`** with the same live network table used by the main menu scan.
+3. **Prioritization** — scores networks (clients, signal, cipher family, WPS, etc.) and shows a **prioritized table**.
+4. **Target selection** — comma-separated indices or explicit `all`; empty or invalid input cancels instead of broadening scope.
+5. **Parallel assessments** — only networks **with observed clients**; per-network worker runs **airodump** + **hcxdumptool**, **deauth** bursts, **3–5 minute** capture window (configurable in code), then **`aircrack-ng`** / **`hashcat`** as appropriate. **Live** status panel shows **per-target heartbeat**.
+6. **Results table** and summary statistics; artifacts under **`auto_hack_sessions/<timestamp>/`** and log append to the session report. Recovered Wi-Fi passphrases are shown in results and can be included in reports, so store outputs securely.
 
 ### Logging and reports
 
@@ -160,7 +160,7 @@ The launcher:
 | **3** | **Select target network** from the current scan results |
 | **4** | Open **Attack techniques** submenu |
 | **5** | Open **Tools** submenu |
-| **6** | Run **Auto hack workflow** |
+| **6** | Run **Automated assessment workflow** |
 | **0** | **Exit** (stops an active scan if needed) |
 
 **Ctrl+C** from the main menu stops an active scan or exits / returns depending on context.
@@ -175,7 +175,7 @@ The launcher:
 
 ### Wordlists
 
-Default paths are defined in **`config/defaults.py`** (e.g. `wordlists/10-million-password-list-top-1000000.txt`, fallback hints to `/usr/share/wordlists/rockyou.txt`). Dictionary and Auto Hack flows prompt or fall back if files are missing.
+Default paths are defined in **`config/defaults.py`** (e.g. `wordlists/10-million-password-list-top-1000000.txt`, fallback hints to `/usr/share/wordlists/rockyou.txt`). Dictionary and automated assessment flows prompt or fall back if files are missing.
 
 ---
 
@@ -185,8 +185,9 @@ Default paths are defined in **`config/defaults.py`** (e.g. `wordlists/10-millio
 |------|---------|
 | `logs/` | Per-run log trees (`main.log`, `attacks.log`, …) |
 | `handshake/` | Handshake `.cap` / related capture material |
+| `handshake/<ssid>_<bssid>_<timestamp>/capture_manifest.json` | Advanced handshake session manifest with quality history, deauth strategy, targeted clients, artifacts, and optional hashcat job metadata |
 | `tmp/` | Temporary **`airodump-ng`** prefixes and scratch files |
-| `auto_hack_sessions/` | Timestamped Auto Hack outputs and reports |
+| `auto_hack_sessions/` | Timestamped automated assessment outputs and reports |
 | `logs/mitm/` | Bettercap-centric MITM session folders |
 
 ---
@@ -196,13 +197,13 @@ Default paths are defined in **`config/defaults.py`** (e.g. `wordlists/10-millio
 | Path | Role |
 |------|------|
 | `wifiangel.py` | Entry point → `app.main:main` |
-| `app/wifi_angel.py` | Main controller, menus, Evil Twin, MITM, Auto Hack |
+| `app/wifi_angel.py` | Main controller, menus, Evil Twin, MITM, automated assessment |
 | `app/main.py` | Environment checks and app bootstrap |
 | `app/ui/` | Rich theme (`theme.py`) and shared widgets (`components.py`) |
 | `app/logger.py` | File logging and report hook |
 | `adapters/system_tools/` | `CommandRunner`, `WiFiAdapterManager`, speed/ping helpers |
-| `attacks/` | External command builders and output parsers |
-| `wifi/` | `airodump-ng` CSV parsing, frame helpers |
+| `attacks/` | External command builders, output parsers, and hashcat job metadata |
+| `wifi/` | `airodump-ng` CSV parsing, frame helpers, capture quality, artifact indexing, telemetry, and profiling |
 | `config/` | Defaults, `PATH` checks, runtime dir creation |
 | `reports/` | HTML / security report generation |
 | `tests/` | `pytest` suite |

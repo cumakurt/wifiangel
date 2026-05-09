@@ -8,12 +8,21 @@ from datetime import datetime
 import subprocess
 import time
 
-from attacks.commands import aircrack_check, aircrack_crack, airodump_capture, aireplay_deauth, hashcat_crack, hcxdumptool_capture, hcxpcapngtool_convert
+from app.safety import sanitize_filename
+from attacks.commands import (
+    aircrack_check,
+    aircrack_crack,
+    airodump_capture,
+    aireplay_deauth,
+    hashcat_crack,
+    hcxdumptool_capture,
+    hcxpcapngtool_convert,
+)
 from attacks.parsers import extract_hashcat_password_for_bssid, extract_wifi_password, has_aircrack_handshake
 
 
 def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, attack_progress=None):
-    """Attack one network for auto-hack mode."""
+    """Assess one network for the automated workflow."""
     dump_proc = None
     pmkid_proc = None
 
@@ -49,14 +58,16 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                 }
 
         _report_attack(0, "Starting capture (airodump + hcxdumptool)")
-        app.logger.info(f"Starting attack on {ssid} ({bssid})")
+        app.logger.info(f"Starting assessment on {ssid} ({bssid})")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        network_dir = session_dir / f"{ssid}_{bssid.replace(':', '')}"
+        safe_ssid = sanitize_filename(ssid, fallback="network")
+        safe_bssid = sanitize_filename(bssid.replace(":", ""), fallback="bssid")
+        network_dir = session_dir / f"{safe_ssid}_{safe_bssid}"
         network_dir.mkdir(parents=True, exist_ok=True)
 
         result = {
-            "status_message": "Attack in progress",
+            "status_message": "Assessment in progress",
             "handshake_status": "[yellow]Trying",
             "pmkid_status": "[yellow]Trying",
             "password": None,
@@ -99,7 +110,7 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
             result["pmkid_status"] = "[red]Failed to start PMKID capture[/]"
 
         with open(session_dir / "auto_hack_report.txt", "a") as f:
-            f.write(f"Attack on {ssid} ({bssid}) started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Assessment on {ssid} ({bssid}) started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"  Channel: {channel}\n")
             f.write(f"  Security: {cipher}\n")
             f.write(f"  Clients: {len(clients)}\n")
@@ -147,9 +158,9 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                 time_remaining = min_capture_time - elapsed_time
                 minutes_remaining = int(time_remaining // 60)
                 seconds_remaining = int(time_remaining % 60)
-                result["status_message"] = f"Attack in progress - {minutes_remaining:02d}:{seconds_remaining:02d} remaining"
+                result["status_message"] = f"Assessment in progress - {minutes_remaining:02d}:{seconds_remaining:02d} remaining"
             else:
-                result["status_message"] = "Attack in progress - Finalizing"
+                result["status_message"] = "Assessment in progress - Finalizing"
 
             if not handshake_found:
                 cap_files = list(network_dir.glob(f"{handshake_file.name}*.cap"))
@@ -210,7 +221,7 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                 if password:
                     password_found = True
                     result["password"] = password
-                    result["status_message"] = "[success]Attack successful - password found."
+                    result["status_message"] = "[success]Assessment successful - passphrase recovered."
                     app.logger.info(f"Password found from handshake for {ssid}: {password}")
 
         if not password_found and pmkid_found and wordlist:
@@ -226,26 +237,26 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                 if password:
                     password_found = True
                     result["password"] = password
-                    result["status_message"] = "[success]Attack successful - password found."
+                    result["status_message"] = "[success]Assessment successful - passphrase recovered."
                     app.logger.info(f"Password found from PMKID for {ssid}: {password}")
 
         if not password_found:
             if handshake_found or pmkid_found:
-                result["status_message"] = "[warning]Captured data but could not crack password."
+                result["status_message"] = "[warning]Captured data but could not recover passphrase."
                 if wordlist:
                     result["status_message"] += " - Try larger wordlist"
             else:
-                result["status_message"] = "[error]Attack failed - no handshake or PMKID captured."
+                result["status_message"] = "[error]Assessment failed - no handshake or PMKID captured."
                 result["handshake_status"] = "[red]Failed"
                 result["pmkid_status"] = "[red]Failed"
 
         with open(session_dir / "auto_hack_report.txt", "a") as f:
-            f.write(f"Attack on {ssid} completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Assessment on {ssid} completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"  Handshake: {'Captured' if handshake_found else 'Failed'}\n")
             f.write(f"  PMKID: {'Captured' if pmkid_found else 'Failed'}\n")
-            f.write(f"  Password: {result['password'] if result['password'] else 'Not found'}\n\n")
+            f.write(f"  Passphrase: {result['password'] if result['password'] else 'Not found'}\n\n")
 
-        app.logger.info(f"Attack on {ssid} completed. Password found: {password_found}")
+        app.logger.info(f"Assessment on {ssid} completed. Passphrase recovered: {password_found}")
         return result
 
     except Exception as exc:
@@ -293,4 +304,3 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                     subprocess.run(["pkill", "-9", "-f", f"hcxdumptool.*{bssid}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
-

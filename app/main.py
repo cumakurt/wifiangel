@@ -11,6 +11,7 @@ from config import (
     ensure_runtime_dirs,
     warn_optional_missing_tools,
 )
+from app.safety import confirm_legal_use
 
 from .wifi_angel import WiFiAngel
 
@@ -22,6 +23,8 @@ def main() -> None:
     check_required_packages(console)
     ensure_runtime_dirs()
     warn_optional_missing_tools(console)
+    if not confirm_legal_use(console):
+        return
 
     wifi_angel = WiFiAngel()
     wifi_angel.run()

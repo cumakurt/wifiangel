@@ -163,3 +163,37 @@ def station_client_counts(stations: list[dict[str, str]]) -> dict[str, set[str]]
             continue
         out.setdefault(ap, set()).add(smac)
     return out
+
+
+def probed_essids_by_bssid(stations: list[dict[str, str]]) -> dict[str, set[str]]:
+    """
+    BSSID -> unique non-empty probe SSIDs from airodump-ng station rows.
+
+    Same CSV export as parse_airodump_csv(); associates probes only with the
+    station row's BSSID (not broadcast to unrelated APs).
+    """
+    out: dict[str, set[str]] = {}
+    for s in stations:
+        smac = ""
+        for key, val in s.items():
+            kl = key.lower()
+            if "station" in kl and "mac" in kl:
+                smac = _norm_mac(val)
+                break
+        if not smac:
+            continue
+        bssid_raw = (s.get("BSSID", "") or "").strip()
+        if not bssid_raw or "not associated" in bssid_raw.lower():
+            continue
+        ap = _norm_mac(bssid_raw)
+        if not ap:
+            continue
+        probed = _col_match(s, "probed", "essid") or (s.get("Probed ESSIDs", "") or "").strip()
+        if not probed:
+            continue
+        for part in probed.replace(";", ",").split(","):
+            p = part.strip()
+            if not p or p.lower() in ("<hidden network>",):
+                continue
+            out.setdefault(ap, set()).add(p)
+    return out

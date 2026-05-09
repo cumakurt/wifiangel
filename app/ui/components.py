@@ -21,17 +21,13 @@ def render_welcome_banner(console: Console, *, author_line: str, url_line: str) 
     title.append("   ", style="default")
     title.append("Wireless security workspace", style="brand_sub")
 
-    subtitle = Text.assemble(
-        ("Authorized testing only: networks you own or have explicit permission to assess.", "meta"),
-    )
-
     footer = Text()
     footer.append(f"(c) {year}  ", style="meta")
     footer.append(author_line.strip(), style="menu.dim")
     footer.append("\n", style="default")
     footer.append(url_line.strip(), style="meta")
 
-    body = Group(title, Text(""), subtitle, Text(""), footer)
+    body = Group(title, Text(""), footer)
     console.print(
         Panel.fit(
             body,

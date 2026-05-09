@@ -9,6 +9,7 @@ from pathlib import Path
 from wifi.airodump_csv import (
     ap_row_to_network_fields,
     parse_airodump_csv,
+    probed_essids_by_bssid,
     station_client_counts,
 )
 
@@ -40,6 +41,24 @@ class AirodumpCsvTests(unittest.TestCase):
             self.assertIn("WPA2", nf["cipher"])
             counts = station_client_counts(stas)
             self.assertEqual(counts.get("aa:bb:cc:dd:ee:ff"), {"11:22:33:44:55:66"})
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_probed_essids_by_bssid(self):
+        csv_text = """
+BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key
+AA:BB:CC:DD:EE:FF, 2024-01-01 10:00:00, 2024-01-01 10:01:00,  6, 360, WPA2 CCMP, CCMP, PSK, -45,       10,        0,   0.  0.  0.  0,   0, ,
+
+Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ESSIDs
+11:22:33:44:55:66, 2024-01-01 10:00:00, 2024-01-01 10:01:00, -50,       20, AA:BB:CC:DD:EE:FF, GuestWiFi
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix="-01.csv", delete=False, encoding="utf-8") as f:
+            f.write(csv_text)
+            path = Path(f.name)
+        try:
+            _aps, stas = parse_airodump_csv(path)
+            probed = probed_essids_by_bssid(stas)
+            self.assertEqual(probed.get("aa:bb:cc:dd:ee:ff"), {"GuestWiFi"})
         finally:
             path.unlink(missing_ok=True)
 
