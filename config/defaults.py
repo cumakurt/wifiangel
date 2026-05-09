@@ -36,8 +36,9 @@ CHANNELS_5GHZ = (
     165,
 )
 
-DEFAULT_WORDLIST = Path("wordlists/10-million-password-list-top-1000000.txt")
+DEFAULT_WORDLIST = Path("wordlists/1mil-AD-passwords.txt")
 ROCKYOU_WORDLIST = Path("/usr/share/wordlists/rockyou.txt")
+HANDSHAKE_CAPTURE_TIMEOUT_SECONDS = 600
 
 LOGS_ROOT = Path("logs")
 TMP_DIR = Path("tmp")
