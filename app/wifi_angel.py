@@ -99,7 +99,15 @@ from app.services.tools.analysis_service import (
 )
 from app.services.tools.hidden_ssid_service import run_hidden_ssid_discovery as svc_run_hidden_ssid_discovery
 from app.services.tools.speed_test_service import run_speed_test as svc_run_speed_test
-from app.services.tools.technical_service import run_technical_intelligence_menu as svc_run_technical_intelligence_menu
+from app.services.tools.technical_service import (
+    run_capture_health_checker as svc_run_capture_health_checker,
+    run_channel_hopper_optimizer as svc_run_channel_hopper_optimizer,
+    run_handshake_validator_pro as svc_run_handshake_validator_pro,
+    run_rf_environment_profiler as svc_run_rf_environment_profiler,
+    run_technical_intelligence_menu as svc_run_technical_intelligence_menu,
+    run_wordlist_intelligence as svc_run_wordlist_intelligence,
+    run_wps_risk_analyzer as svc_run_wps_risk_analyzer,
+)
 from app.context.runtime_state import RuntimeState
 from app.controllers.attack_menu import run_attack_menu as ctrl_run_attack_menu, run_deauth_menu as ctrl_run_deauth_menu
 from app.controllers.app_controller import run_application_loop as ctrl_run_application_loop
@@ -383,6 +391,24 @@ class WiFiAngel:
 
     def technical_intelligence(self):
         svc_run_technical_intelligence_menu(self)
+
+    def rf_environment_profiler(self):
+        return svc_run_rf_environment_profiler(self)
+
+    def handshake_validator_pro(self):
+        return svc_run_handshake_validator_pro(self)
+
+    def wordlist_intelligence(self):
+        return svc_run_wordlist_intelligence(self)
+
+    def capture_health_checker(self):
+        return svc_run_capture_health_checker(self)
+
+    def wps_risk_analyzer(self):
+        return svc_run_wps_risk_analyzer(self)
+
+    def channel_hopper_optimizer(self):
+        return svc_run_channel_hopper_optimizer(self)
 
     def _speed_test_impl(self):
         return svc_run_speed_test(self)

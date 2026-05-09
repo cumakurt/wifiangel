@@ -23,7 +23,12 @@ def run_tools_menu(app) -> None:
                 ("8", "Hidden SSID discovery"),
                 ("9", "Bluetooth and IoT scan"),
                 ("10", "Network speed test"),
-                ("11", "Technical intelligence"),
+                ("11", "RF Environment Profiler"),
+                ("12", "Handshake Validator Pro"),
+                ("13", "Wordlist Intelligence"),
+                ("14", "Capture Health Checker"),
+                ("15", "WPS Risk Analyzer"),
+                ("16", "Channel Hopper Optimizer"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -40,7 +45,12 @@ def run_tools_menu(app) -> None:
             "8": app.hidden_ssid_discovery,
             "9": app.bluetooth_iot_scanner,
             "10": app.speed_test,
-            "11": app.technical_intelligence,
+            "11": app.rf_environment_profiler,
+            "12": app.handshake_validator_pro,
+            "13": app.wordlist_intelligence,
+            "14": app.capture_health_checker,
+            "15": app.wps_risk_analyzer,
+            "16": app.channel_hopper_optimizer,
         }
         if choice == "0":
             return

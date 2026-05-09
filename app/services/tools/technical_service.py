@@ -17,6 +17,14 @@ from app.ui import BORDER_STYLE, render_menu_panel
 from attacks.hashcat_jobs import HashcatJobStore
 from config import HANDSHAKE_DIR, TMP_DIR
 from wifi.artifacts import best_artifacts_by_identity, index_capture_artifacts
+from wifi.advanced_tools import (
+    analyze_rf_environment,
+    analyze_wps_risk,
+    build_wordlist_intelligence,
+    check_capture_health,
+    optimize_channel_hopper,
+    validate_handshake_pmkid,
+)
 from wifi.capture_quality import analyze_capture_quality
 from wifi.channel_hopper import build_adaptive_channel_plan
 from wifi.client_profiler import build_client_profiles
@@ -40,6 +48,12 @@ def run_technical_intelligence_menu(app) -> None:
                 ("7", "Interface capability profiler"),
                 ("8", "Live packet-rate telemetry"),
                 ("9", "Adaptive channel plan"),
+                ("10", "RF environment profiler"),
+                ("11", "Handshake Validator Pro"),
+                ("12", "Wordlist intelligence"),
+                ("13", "Capture health checker"),
+                ("14", "WPS risk analyzer"),
+                ("15", "Channel Hopper Optimizer"),
                 ("0", "Back"),
             ],
         )
@@ -54,6 +68,12 @@ def run_technical_intelligence_menu(app) -> None:
             "7": run_interface_capability_profiler,
             "8": run_live_packet_rate_telemetry,
             "9": run_adaptive_channel_plan,
+            "10": run_rf_environment_profiler,
+            "11": run_handshake_validator_pro,
+            "12": run_wordlist_intelligence,
+            "13": run_capture_health_checker,
+            "14": run_wps_risk_analyzer,
+            "15": run_channel_hopper_optimizer,
         }
         if choice == "0":
             return
@@ -283,6 +303,167 @@ def run_adaptive_channel_plan(app) -> None:
     table.add_column("Reason", style="cyan")
     for idx, entry in enumerate(plan[:20], 1):
         table.add_row(str(idx), str(entry.channel), entry.band, str(entry.dwell_ms), f"{entry.score:.2f}", entry.reason)
+    app.console.print(table)
+
+
+def run_rf_environment_profiler(app) -> None:
+    if not app.networks:
+        app.console.print("[bold red]No networks found. Please scan first.[/]")
+        return
+    report = analyze_rf_environment(app.networks)
+    table = Table(title="[bold blue]RF Environment Profile[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Channel", style="cyan", justify="right")
+    table.add_column("APs", style="yellow", justify="right")
+    table.add_column("Avg dBm", style="green", justify="right")
+    table.add_column("Overlap", style="magenta", justify="right")
+    table.add_column("Noise", style="white", justify="right")
+    table.add_column("Interference", style="red")
+    for item in sorted(report.channels, key=lambda row: row.channel):
+        table.add_row(
+            str(item.channel),
+            str(item.ap_count),
+            str(item.avg_signal),
+            str(item.overlap_ap_count),
+            f"{item.noise_score:.2f}",
+            item.interference,
+        )
+    app.console.print(table)
+    if report.best_attack_channels:
+        app.console.print(f"[success]Best channels for targeting:[/] {', '.join(str(ch) for ch in report.best_attack_channels)}")
+
+
+def run_handshake_validator_pro(app) -> None:
+    path = _prompt_existing_file("Capture/hash file", default=str(HANDSHAKE_DIR))
+    if not path:
+        app.console.print("[bold red]No valid capture file selected.[/]")
+        return
+    bssid = Prompt.ask("Expected BSSID (optional)", default="").strip() or None
+    report = validate_handshake_pmkid(path, expected_bssid=bssid, command_runner=app.command_runner)
+    table = Table(title="[bold blue]Handshake Validator Pro[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Field", style="cyan", no_wrap=True)
+    table.add_column("Value", style="white")
+    table.add_row("File", report.path)
+    table.add_row("Quality score", str(report.quality_score))
+    table.add_row("Quality verdict", report.quality_verdict)
+    table.add_row("BSSID matched", "yes" if report.bssid_matched else "no")
+    table.add_row("aircrack-ng", report.aircrack_result)
+    table.add_row("hcxhashtool", report.hcx_result)
+    table.add_row("Final verdict", report.verdict)
+    table.add_row("Notes", "\n".join(report.notes))
+    app.console.print(table)
+
+
+def run_wordlist_intelligence(app) -> None:
+    if app.selected_network and app.selected_network in app.networks:
+        network = app.networks[app.selected_network]
+        default_ssid = str(network.get("ssid", ""))
+        default_bssid = str(app.selected_network)
+    else:
+        default_ssid = ""
+        default_bssid = ""
+    ssid = Prompt.ask("Target SSID", default=default_ssid).strip()
+    if not ssid:
+        app.console.print("[bold red]SSID is required for wordlist generation.[/]")
+        return
+    bssid = Prompt.ask("Target BSSID (optional)", default=default_bssid).strip()
+    extra = Prompt.ask("Extra keywords (comma separated)", default="").strip()
+    max_words = IntPrompt.ask("Max generated words", default=120)
+    suggestions = build_wordlist_intelligence(
+        ssid=ssid,
+        bssid=bssid,
+        extra_keywords=[item.strip() for item in extra.split(",") if item.strip()],
+        max_words=max_words,
+    )
+    table = Table(title="[bold blue]Wordlist Intelligence[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Rank", style="cyan", justify="right")
+    table.add_column("Candidate", style="white")
+    table.add_column("Source", style="yellow")
+    table.add_column("Score", style="green", justify="right")
+    for idx, item in enumerate(suggestions[:50], 1):
+        table.add_row(str(idx), item.value, item.source, str(item.score))
+    app.console.print(table)
+    save = Confirm.ask("Save generated words to file?", default=False)
+    if save:
+        output = Prompt.ask("Output path", default=str(TMP_DIR / "wordlist_intelligence.txt")).strip()
+        path = Path(output).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(item.value for item in suggestions), encoding="utf-8")
+        app.console.print(f"[success]Wordlist written to {path}[/]")
+
+
+def run_capture_health_checker(app) -> None:
+    path = _prompt_existing_file("Capture/hash file", default=str(HANDSHAKE_DIR))
+    if not path:
+        app.console.print("[bold red]No valid capture file selected.[/]")
+        return
+    report = check_capture_health(path)
+    table = Table(title="[bold blue]Capture Health Checker[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("File", report.path)
+    table.add_row("Format", report.format)
+    table.add_row("Total records", str(report.total_records))
+    table.add_row("Valid records", str(report.valid_records))
+    table.add_row("Duplicate records", str(report.duplicate_records))
+    table.add_row("Corrupted records", str(report.corrupted_records))
+    table.add_row("Verdict", report.verdict)
+    table.add_row("Notes", "\n".join(report.notes))
+    app.console.print(table)
+
+
+def run_wps_risk_analyzer(app) -> None:
+    if not app.networks:
+        app.console.print("[bold red]No networks found. Please scan first.[/]")
+        return
+    bssids = list(app.networks.keys())
+    default_idx = 1 if bssids else 0
+    for idx, bssid in enumerate(bssids, 1):
+        ssid = app.networks[bssid].get("ssid", "<Hidden>")
+        app.console.print(f"{idx}. {ssid} [{bssid}]")
+    selection = IntPrompt.ask("Select target network", default=default_idx)
+    if not 1 <= selection <= len(bssids):
+        app.console.print("[warning]Invalid selection.[/]")
+        return
+    bssid = bssids[selection - 1]
+    network = dict(app.networks[bssid])
+    network["bssid"] = bssid
+    lock_state = Prompt.ask("WPS lock state", choices=["unknown", "unlocked", "locked"], default="unknown")
+    rate_hint = Prompt.ask("Rate-limit hint", default="unknown").strip() or "unknown"
+    report = analyze_wps_risk(network, lock_state=lock_state, rate_limit_hint=rate_hint)
+    table = Table(title="[bold blue]WPS Risk Analyzer[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("SSID", report.ssid)
+    table.add_row("BSSID", report.bssid)
+    table.add_row("Lock state", report.lock_state)
+    table.add_row("Rate limit", report.rate_limit_hint)
+    table.add_row("Success window", report.success_window)
+    table.add_row("Risk score", str(report.risk_score))
+    table.add_row("Recommendation", report.recommendation)
+    app.console.print(table)
+
+
+def run_channel_hopper_optimizer(app) -> None:
+    if not app.networks:
+        app.console.print("[bold red]No networks found. Please scan first.[/]")
+        return
+    optimized = optimize_channel_hopper(app.networks)
+    table = Table(title="[bold blue]Channel Hopper Optimizer[/]", box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Rank", style="cyan", justify="right")
+    table.add_column("Channel", style="green", justify="right")
+    table.add_column("Dwell ms", style="yellow", justify="right")
+    table.add_column("Hop interval ms", style="magenta", justify="right")
+    table.add_column("Score", style="white", justify="right")
+    table.add_column("Reason", style="cyan")
+    for idx, entry in enumerate(optimized[:25], 1):
+        table.add_row(
+            str(idx),
+            str(entry.channel),
+            str(entry.dwell_ms),
+            str(entry.hop_interval_ms),
+            f"{entry.score:.2f}",
+            entry.reason,
+        )
     app.console.print(table)
 
 

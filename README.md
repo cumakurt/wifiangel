@@ -15,6 +15,7 @@ WiFiAngel is an interactive **terminal (TUI)** application for **authorized** wi
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Using the application](#using-the-application)
+- [Screenshots](#screenshots)
 - [Runtime files and reports](#runtime-files-and-reports)
 - [Repository layout](#repository-layout)
 - [Development](#development)
@@ -62,7 +63,12 @@ All attack flows assume a **selected target** where applicable. The app asks for
 | **8** | **Hidden SSID discovery** | Workflows to infer or surface hidden SSIDs where frames allow. |
 | **9** | **Bluetooth and IoT scan** | **`bleak`**-based BLE discovery (requires Python dependency); lists nearby BLE devices when available. |
 | **10** | **Network speed test** | Upload/download probes via **`curl`** (or configured runners), with formatted throughput and simple recommendations. |
-| **11** | **Technical intelligence** | Capture quality scoring, EAPOL replay checks, 802.11 frame intelligence, adaptive channel planning, artifact indexing, hashcat job metadata, PMF/WPA3 compatibility hints, target client profiling, interface capability profiling, and live packet-rate telemetry. |
+| **11** | **RF Environment Profiler** | Channel density, estimated noise pressure, and overlap-aware interference profiling; suggests best channels for targeting strategy. |
+| **12** | **Handshake Validator Pro** | Multi-source validation for captured handshake/PMKID artifacts using quality scoring plus `aircrack-ng` and `hcxhashtool` checks when available. |
+| **13** | **Wordlist Intelligence** | Generates SSID/OUI/vendor-aware candidate wordlists with scored mutations and optional export. |
+| **14** | **Capture Health Checker** | Validates `.cap` / `.pcapng` / `.22000` capture integrity, duplicate records, and corrupt entries with a health verdict. |
+| **15** | **WPS Risk Analyzer** | Estimates WPS lock-state exposure, rate-limit hints, and practical success window for WPS-enabled targets. |
+| **16** | **Channel Hopper Optimizer** | Adaptive per-channel dwell and hop-interval optimization based on live network/client pressure. |
 
 ### Automated assessment workflow
 
@@ -176,6 +182,25 @@ The launcher:
 ### Wordlists
 
 Default paths are defined in **`config/defaults.py`** (e.g. `wordlists/10-million-password-list-top-1000000.txt`, fallback hints to `/usr/share/wordlists/rockyou.txt`). Dictionary and automated assessment flows prompt or fall back if files are missing.
+
+---
+
+## Screenshots
+
+### Main menu
+
+![Main menu](images/main_menu.png)
+_Controller entrypoint for stateful workflow orchestration: interface bootstrap, monitor-mode transition, `airodump-ng` scan loop control, target context binding, module dispatch, and graceful lifecycle cleanup._
+
+### Attack techniques
+
+![Attack techniques](images/Attack_techniques.png)
+_Offensive workflow dispatcher for handshake/PMKID acquisition pipelines, targeted/broadcast deauth primitives, WPS routines, Evil Twin lab provisioning (`hostapd`/`dnsmasq`/NAT), and bettercap-driven MITM telemetry sessions._
+
+### Tools menu
+
+![Tools menu](images/tools.png)
+_Diagnostic and post-capture analysis surface: RF channel interference modeling, multi-source handshake/PMKID validation, SSID/OUI-derived wordlist synthesis, capture integrity checks, WPS exposure scoring, and adaptive channel-hop interval optimization._
 
 ---
 
