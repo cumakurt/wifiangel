@@ -34,12 +34,17 @@ def verify_handshake(cap_file, bssid, logger, ssid=None) -> bool:
     """Verify a WPA handshake using multiple tools when available."""
     try:
         logger.info(f"Verifying handshake in {cap_file}")
-        aircrack_result = subprocess.run(aircrack_check(cap_file), capture_output=True, text=True)
+        aircrack_result = subprocess.run(
+            aircrack_check(cap_file),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
         pyrit_verification = False
         try:
             pyrit_cmd = ["pyrit", "-r", str(cap_file), "analyze"]
-            pyrit_result = subprocess.run(pyrit_cmd, capture_output=True, text=True)
+            pyrit_result = subprocess.run(pyrit_cmd, capture_output=True, text=True, timeout=30)
             if "handshake(s)" in pyrit_result.stdout:
                 pyrit_verification = True
                 logger.info("Pyrit verified handshake")
@@ -50,7 +55,7 @@ def verify_handshake(cap_file, bssid, logger, ssid=None) -> bool:
         if ssid:
             try:
                 cowpatty_cmd = ["cowpatty", "-c", "-r", str(cap_file), "-s", ssid]
-                cowpatty_result = subprocess.run(cowpatty_cmd, capture_output=True, text=True)
+                cowpatty_result = subprocess.run(cowpatty_cmd, capture_output=True, text=True, timeout=30)
                 if "Collected all necessary data to mount crack against WPA" in cowpatty_result.stdout:
                     cowpatty_verification = True
                     logger.info("Cowpatty verified handshake")
@@ -102,7 +107,7 @@ def verify_pmkid(pmkid_file, bssid, logger) -> bool:
 
         try:
             hashcat_cmd = ["hashcat", "--show", "-m", "22000", str(pmkid_file)]
-            hashcat_result = subprocess.run(hashcat_cmd, capture_output=True, text=True)
+            hashcat_result = subprocess.run(hashcat_cmd, capture_output=True, text=True, timeout=30)
             if bssid.replace(":", "").lower() in hashcat_result.stdout.lower():
                 logger.info("Hashcat verified PMKID")
                 return True
@@ -111,7 +116,7 @@ def verify_pmkid(pmkid_file, bssid, logger) -> bool:
 
         try:
             hcx_cmd = hcxpcapngtool_info(str(pmkid_file).replace(".22000", ".pcapng"))
-            hcx_result = subprocess.run(hcx_cmd, capture_output=True, text=True)
+            hcx_result = subprocess.run(hcx_cmd, capture_output=True, text=True, timeout=30)
             if bssid.lower() in hcx_result.stdout.lower():
                 logger.info("hcxpcapngtool verified PMKID")
                 return True

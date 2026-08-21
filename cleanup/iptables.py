@@ -14,6 +14,7 @@ FILTER_CHAIN = "WIFIANGEL_ET_FWD"
 NAT_CHAIN = "WIFIANGEL_ET_NAT"
 PRE_CHAIN = "WIFIANGEL_ET_PRE"
 INPUT_CHAIN = "WIFIANGEL_ET_IN"
+MITM_NAT_CHAIN = "WIFIANGEL_MITM_NAT"
 LAN_CIDR = "192.168.1.0/24"
 PORTAL_IP = "192.168.1.1"
 
@@ -178,6 +179,47 @@ def remove_evil_twin_nat(
     """Remove WIFIANGEL_ET_* jumps and chains; ignore missing-chain errors."""
     runner = run or _run_iptables
     for command in evil_twin_nat_teardown_commands(lan_cidr=lan_cidr):
+        runner(command)
+
+
+def mitm_nat_setup_commands(*, out_iface: str) -> list[Command]:
+    """Return argv lists that install a scoped POSTROUTING MASQUERADE chain."""
+    out = _require_iface(out_iface)
+    return [
+        ["iptables", "-t", "nat", "-N", MITM_NAT_CHAIN],
+        ["iptables", "-t", "nat", "-F", MITM_NAT_CHAIN],
+        ["iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-o", out, "-j", MITM_NAT_CHAIN],
+        ["iptables", "-t", "nat", "-A", MITM_NAT_CHAIN, "-o", out, "-j", "MASQUERADE"],
+    ]
+
+
+def mitm_nat_teardown_commands(*, out_iface: Optional[str] = None, jump_retries: int = 8) -> list[Command]:
+    """Return argv lists that remove WIFIANGEL_MITM_NAT without flushing host tables."""
+    commands: list[Command] = []
+    retries = max(1, jump_retries)
+    if out_iface:
+        out = _require_iface(out_iface)
+        for _ in range(retries):
+            commands.append(["iptables", "-t", "nat", "-D", "POSTROUTING", "-o", out, "-j", MITM_NAT_CHAIN])
+    commands.extend(
+        [
+            ["iptables", "-t", "nat", "-F", MITM_NAT_CHAIN],
+            ["iptables", "-t", "nat", "-X", MITM_NAT_CHAIN],
+        ]
+    )
+    return commands
+
+
+def apply_mitm_nat(*, out_iface: str, run: Optional[Runner] = None) -> None:
+    runner = run or _run_iptables
+    remove_mitm_nat(out_iface=out_iface, run=runner)
+    setup = mitm_nat_setup_commands(out_iface=out_iface)
+    _run_command_groups(setup, run=runner, ignore_create_chain=True)
+
+
+def remove_mitm_nat(*, out_iface: Optional[str] = None, run: Optional[Runner] = None) -> None:
+    runner = run or _run_iptables
+    for command in mitm_nat_teardown_commands(out_iface=out_iface):
         runner(command)
 
 

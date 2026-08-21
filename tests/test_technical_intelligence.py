@@ -157,6 +157,22 @@ class TechnicalIntelligenceTests(unittest.TestCase):
             self.assertIn("?d?d?d?d", mask_job.command())
             self.assertEqual(mask_job.restore_command()[-1], "--restore")
 
+    def test_hashcat_job_store_survives_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = HashcatJobStore(root / "jobs.json")
+            store.path.write_text("{not-json", encoding="utf-8")
+            self.assertEqual(store.list_jobs(), [])
+            hash_file = root / "hash.22000"
+            wordlist = root / "words.txt"
+            hash_file.write_text("hash", encoding="utf-8")
+            wordlist.write_text("password123\n", encoding="utf-8")
+            job = store.create_job(hash_file=hash_file, wordlist=wordlist, mode=22000)
+            self.assertEqual(len(store.list_jobs()), 1)
+            self.assertEqual(store.list_jobs()[0].job_id, job.job_id)
+            raw = store.path.read_text(encoding="utf-8")
+            self.assertTrue(raw.strip().startswith("["))
+
     def test_interface_capability_parser(self):
         output = """
 Supported interface modes:

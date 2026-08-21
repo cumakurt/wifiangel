@@ -13,6 +13,7 @@ from typing import Optional
 from rich import box
 from rich.table import Table
 
+from adapters.system_tools import terminate_process
 from attacks.commands import airodump_network_discovery
 from app.ui import BORDER_STYLE
 from config import TMP_DIR
@@ -165,7 +166,7 @@ def run_hidden_ssid_discovery(app) -> None:
                 minutes = elapsed // 60
                 seconds = elapsed % 60
                 duration = f"{minutes:02d}:{seconds:02d}"
-                os.system("clear" if os.name != "nt" else "cls")
+                app.console.clear()
                 app.console.print(f"[bold blue]Hidden SSID Discovery - Duration: {duration}[/]")
                 app.console.print(f"[bold yellow]Tracking {len(hidden_networks)} hidden / previously hidden AP(s)[/]")
                 app.console.print("[bold red]Press Ctrl+C to stop scanning and return to the main menu[/]")
@@ -191,15 +192,7 @@ def run_hidden_ssid_discovery(app) -> None:
         stop_event.set()
     finally:
         stop_event.set()
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        terminate_process(proc, timeout=3)
         try:
             for p in prefix.parent.glob(prefix.name + "*"):
                 p.unlink(missing_ok=True)

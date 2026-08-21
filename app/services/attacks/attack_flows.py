@@ -669,7 +669,7 @@ def run_dictionary_attack(app) -> None:
                         current_key = password_candidate
                         password_found = True
                         app.logger.info(
-                            f"Password found for {network['ssid'] if network else selected_file.name}: {current_key}"
+                            f"Passphrase recovered for {network['ssid'] if network else selected_file.name}"
                         )
                         process.terminate()
                         found_in_line = True
@@ -695,10 +695,10 @@ def run_dictionary_attack(app) -> None:
             if password_candidate:
                 current_key = password_candidate
                 password_found = True
-                app.logger.info(f"Password found in output analysis: {current_key}")
+                app.logger.info("Passphrase recovered from tool output analysis")
 
         if password_found and not is_valid_wifi_password(current_key):
-            app.logger.warning(f"Invalid password candidate detected: {current_key} - marking as not found")
+            app.logger.warning("Invalid password candidate detected - marking as not found")
             password_found = False
             current_key = ""
 

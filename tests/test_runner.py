@@ -1,6 +1,6 @@
 import subprocess
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from adapters.system_tools import CommandRunner, terminate_process
 
@@ -49,6 +49,26 @@ class CommandRunnerTests(unittest.TestCase):
         terminate_process(proc, timeout=0.01)
         proc.terminate.assert_called_once()
         proc.kill.assert_called_once()
+
+
+class CommandRunnerStdinTests(unittest.TestCase):
+    def test_run_uses_devnull_stdin_when_no_input(self):
+        runner = CommandRunner(dry_run=False)
+        with patch("adapters.system_tools.runner.subprocess.run") as mocked:
+            mocked.return_value = subprocess.CompletedProcess(args=["true"], returncode=0, stdout="", stderr="")
+            runner.run(["true"])
+            kwargs = mocked.call_args.kwargs
+            self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertNotIn("input", kwargs)
+
+    def test_run_passes_input_without_stdin(self):
+        runner = CommandRunner(dry_run=False)
+        with patch("adapters.system_tools.runner.subprocess.run") as mocked:
+            mocked.return_value = subprocess.CompletedProcess(args=["cat"], returncode=0, stdout="", stderr="")
+            runner.run(["cat"], input="rules")
+            kwargs = mocked.call_args.kwargs
+            self.assertEqual(kwargs["input"], "rules")
+            self.assertNotIn("stdin", kwargs)
 
 
 if __name__ == "__main__":

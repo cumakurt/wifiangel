@@ -29,6 +29,9 @@ def snapshot_networks(app) -> list[tuple[str, dict[str, Any]]]:
             probes = data.get("probes")
             if isinstance(probes, (set, list, tuple)):
                 row["probes"] = set(probes)
+            signals = data.get("client_signals")
+            if isinstance(signals, dict):
+                row["client_signals"] = dict(signals)
             snapshot.append((bssid, row))
         return snapshot
 
@@ -38,11 +41,23 @@ def selected_network_record(app) -> Optional[tuple[str, dict[str, Any]]]:
     bssid = getattr(app, "selected_network", None)
     if not bssid:
         return None
-    networks = getattr(app, "networks", None) or {}
-    network = networks.get(bssid)
-    if network is None:
-        return None
-    return str(bssid), network
+    lock = ensure_networks_lock(app)
+    with lock:
+        networks = getattr(app, "networks", None) or {}
+        network = networks.get(bssid)
+        if network is None:
+            return None
+        row = dict(network)
+        clients = network.get("clients")
+        if isinstance(clients, (set, list, tuple)):
+            row["clients"] = set(clients)
+        probes = network.get("probes")
+        if isinstance(probes, (set, list, tuple)):
+            row["probes"] = set(probes)
+        signals = network.get("client_signals")
+        if isinstance(signals, dict):
+            row["client_signals"] = dict(signals)
+        return str(bssid), row
 
 
 def require_selected_network(app) -> Optional[tuple[str, dict[str, Any]]]:

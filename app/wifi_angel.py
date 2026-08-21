@@ -9,7 +9,6 @@ from typing import Optional
 
 from rich import box
 from rich.console import Console
-from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 
@@ -148,7 +147,6 @@ class WiFiAngel:
         self.current_menu = "main"
         self._suppress_live_updates = False
         self._current_scan_channel = 0
-        self.layout = Layout()
         self.live = Live("", console=self.console, auto_refresh=False)
         self.logger = Logger()
         self.command_runner = CommandRunner(logger=self.logger)
@@ -283,8 +281,8 @@ class WiFiAngel:
     def _generate_html_report(self, session_dir, attack_results, html_report_file):
         return svc_generate_html_report(self, session_dir, attack_results, html_report_file)
 
-    def cleanup_and_exit(self):
-        svc_cleanup_and_exit(self)
+    def cleanup_and_exit(self, exit_code: int = 0):
+        svc_cleanup_and_exit(self, exit_code=exit_code)
 
     def run(self):
         ctrl_run_application_loop(self)

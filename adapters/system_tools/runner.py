@@ -60,16 +60,20 @@ class CommandRunner:
         if self.dry_run:
             return CommandResult(args=args, returncode=0, dry_run=True)
 
-        completed = subprocess.run(
-            list(args),
-            capture_output=capture_output,
-            text=text,
-            stdout=stdout,
-            stderr=stderr,
-            input=input,
-            timeout=timeout,
-            check=check,
-        )
+        run_kwargs = {
+            "capture_output": capture_output,
+            "text": text,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timeout": timeout,
+            "check": check,
+        }
+        if input is None:
+            run_kwargs["stdin"] = subprocess.DEVNULL
+        else:
+            run_kwargs["input"] = input
+
+        completed = subprocess.run(list(args), **run_kwargs)
         return CommandResult(
             args=args,
             returncode=completed.returncode,

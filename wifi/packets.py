@@ -55,10 +55,16 @@ def parse_network_observation(pkt) -> Optional[NetworkObservation]:
 
 
 def parse_client_observation(pkt) -> Optional[ClientObservation]:
-    if not _has_layer(pkt, "Dot11") or getattr(pkt, "type", None) != 2:
+    if not _has_layer(pkt, "Dot11"):
         return None
-
     dot11 = _get_layer(pkt, "Dot11")
+    if dot11 is None:
+        return None
+    frame_type = getattr(dot11, "type", None)
+    if frame_type is None:
+        frame_type = getattr(pkt, "type", None)
+    if frame_type != 2:
+        return None
     addr1 = _norm_mac(getattr(dot11, "addr1", None))
     addr2 = _norm_mac(getattr(dot11, "addr2", None))
     addr3 = _norm_mac(getattr(dot11, "addr3", None))

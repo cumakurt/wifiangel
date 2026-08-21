@@ -117,6 +117,24 @@ class LabPortalTests(unittest.TestCase):
             finally:
                 portal.stop()
 
+    def test_post_with_invalid_content_length_still_serves(self):
+        import http.client
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "portal.jsonl"
+            portal = LabCaptivePortal("127.0.0.1", log_path, port=0)
+            portal.start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", portal.bound_port, timeout=2)
+                conn.request("POST", "/", body=b"ok", headers={"Content-Length": "not-int"})
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                resp.read()
+                conn.close()
+                self.assertGreaterEqual(portal.hit_count, 1)
+            finally:
+                portal.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

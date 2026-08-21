@@ -26,6 +26,14 @@ def _int_field(val: str, default: int = 0) -> int:
         return default
 
 
+def _station_mac(row: dict[str, str]) -> str:
+    for key, val in row.items():
+        kl = key.lower()
+        if "station" in kl and "mac" in kl:
+            return _norm_mac(val)
+    return ""
+
+
 def _row_dict(raw_row: dict[str, str | None]) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in raw_row.items():
@@ -80,12 +88,7 @@ def parse_airodump_csv(path: Path) -> tuple[list[dict[str, str]], list[dict[str,
         reader = csv.DictReader(io.StringIO(sta_block))
         for raw_row in reader:
             row = _row_dict(raw_row)
-            smac = ""
-            for key, val in row.items():
-                kl = key.lower()
-                if "station" in kl and "mac" in kl:
-                    smac = _norm_mac(val)
-                    break
+            smac = _station_mac(row)
             if not smac:
                 continue
             stas.append(row)
@@ -159,12 +162,7 @@ def station_client_signals(stations: list[dict[str, str]]) -> dict[str, dict[str
     """BSSID -> {station MAC: last observed power}."""
     out: dict[str, dict[str, int]] = {}
     for s in stations:
-        smac = ""
-        for key, val in s.items():
-            kl = key.lower()
-            if "station" in kl and "mac" in kl:
-                smac = _norm_mac(val)
-                break
+        smac = _station_mac(s)
         if not smac:
             continue
         bssid_raw = s.get("BSSID", "").strip()
@@ -187,12 +185,7 @@ def probed_essids_by_bssid(stations: list[dict[str, str]]) -> dict[str, set[str]
     """
     out: dict[str, set[str]] = {}
     for s in stations:
-        smac = ""
-        for key, val in s.items():
-            kl = key.lower()
-            if "station" in kl and "mac" in kl:
-                smac = _norm_mac(val)
-                break
+        smac = _station_mac(s)
         if not smac:
             continue
         bssid_raw = (s.get("BSSID", "") or "").strip()
@@ -228,12 +221,7 @@ def station_probe_rows(stations: list[dict[str, str]]) -> list[tuple[str, str | 
     """Return (station_mac, associated_bssid_or_none, probed_ssids) for each station."""
     rows: list[tuple[str, str | None, tuple[str, ...]]] = []
     for station in stations:
-        station_mac = ""
-        for key, val in station.items():
-            kl = key.lower()
-            if "station" in kl and "mac" in kl:
-                station_mac = _norm_mac(val)
-                break
+        station_mac = _station_mac(station)
         if not station_mac:
             continue
         names = parse_probed_essid_field(

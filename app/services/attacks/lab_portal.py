@@ -83,9 +83,21 @@ def _handler_class(state: PortalState):
             self._serve("HEAD", body=False)
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            if 0 < length <= 4096:
-                self.rfile.read(length)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if length < 0:
+                length = 0
+            to_read = min(length, 4096)
+            if to_read:
+                self.rfile.read(to_read)
+            leftover = length - to_read
+            while leftover > 0:
+                chunk = self.rfile.read(min(65536, leftover))
+                if not chunk:
+                    break
+                leftover -= len(chunk)
             self._serve("POST")
 
         def _serve(self, method: str, *, body: bool = True) -> None:

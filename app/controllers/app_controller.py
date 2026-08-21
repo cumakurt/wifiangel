@@ -20,4 +20,4 @@ def run_application_loop(app) -> None:
                     continue
     except Exception as exc:
         app.logger.error(f"Unexpected error: {str(exc)}")
-        app.cleanup_and_exit()
+        app.cleanup_and_exit(exit_code=1)

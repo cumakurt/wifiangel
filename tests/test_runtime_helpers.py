@@ -39,10 +39,28 @@ def test_selected_network_record_and_stale_clear():
 
 def test_snapshot_networks_copies_clients():
     clients = {"11:22:33:44:55:66"}
-    app = SimpleNamespace(networks={"aa:bb:cc:dd:ee:ff": {"ssid": "Lab", "clients": clients}})
+    signals = {"11:22:33:44:55:66": -40}
+    app = SimpleNamespace(
+        networks={"aa:bb:cc:dd:ee:ff": {"ssid": "Lab", "clients": clients, "client_signals": signals}}
+    )
     snapshot = snapshot_networks(app)
     assert snapshot[0][1]["clients"] == clients
     snapshot[0][1]["clients"].add("00:00:00:00:00:00")
+    snapshot[0][1]["client_signals"]["11:22:33:44:55:66"] = -10
+    assert "00:00:00:00:00:00" not in clients
+    assert signals["11:22:33:44:55:66"] == -40
+
+
+def test_selected_network_record_copies_under_lock():
+    clients = {"11:22:33:44:55:66"}
+    app = SimpleNamespace(
+        selected_network="aa:bb:cc:dd:ee:ff",
+        networks={"aa:bb:cc:dd:ee:ff": {"ssid": "Lab", "clients": clients}},
+        console=_Console(),
+    )
+    record = selected_network_record(app)
+    assert record is not None
+    record[1]["clients"].add("00:00:00:00:00:00")
     assert "00:00:00:00:00:00" not in clients
 
 

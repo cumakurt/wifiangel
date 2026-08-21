@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
+from adapters.system_tools import terminate_process
 from app.ui.theme import BORDER_STYLE
 from app.services.runtime_helpers import selected_network_record
 from app.services.system.adapter_roles import dedicated_ap_radio, resolve_ap_interface, role_exclude_ifaces
@@ -40,6 +41,32 @@ from app.services.attacks.evil_twin_lab import (
 from app.services.attacks.lab_portal import LabCaptivePortal, PORTAL_BIND_IP
 from cleanup import LAN_CIDR, apply_evil_twin_nat, remove_evil_twin_nat, resolve_evil_twin_log_dir
 from wifi.probes import preferred_evil_twin_ssid, probe_stats_from_app
+
+
+def _popen_to_logs(argv: list[str], stdout_path: Path, stderr_path: Path) -> subprocess.Popen:
+    """Start a child with logs on disk so PIPE buffers cannot deadlock it."""
+    stdout_handle = stdout_path.open("ab")
+    stderr_handle = stderr_path.open("ab")
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=stdout_handle,
+        stderr=stderr_handle,
+    )
+    proc._wifiangel_log_handles = (stdout_handle, stderr_handle)  # type: ignore[attr-defined]
+    return proc
+
+
+def _close_popen_logs(proc: Optional[subprocess.Popen]) -> None:
+    handles = getattr(proc, "_wifiangel_log_handles", None) if proc is not None else None
+    if not handles:
+        return
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
 
 
 def run_evil_twin_attack(app) -> None:
@@ -402,14 +429,24 @@ def run_evil_twin_attack_impl(app, mode: str = "psk") -> None:
 
         app.console.print("[bold blue]Starting Evil Twin access point...[/]")
         app.logger.log_evil_twin("Starting access point")
-        hostapd_proc = subprocess.Popen(["hostapd", str(hostapd_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        hostapd_stdout = log_dir / "hostapd.stdout.log"
+        hostapd_stderr = log_dir / "hostapd.stderr.log"
+        dnsmasq_stdout = log_dir / "dnsmasq.stdout.log"
+        dnsmasq_stderr = log_dir / "dnsmasq.stderr.log"
+        hostapd_proc = _popen_to_logs(["hostapd", str(hostapd_path)], hostapd_stdout, hostapd_stderr)
+        original_settings["hostapd_proc"] = hostapd_proc
         time.sleep(3)
         if hostapd_proc.poll() is not None:
             app.logger.log_evil_twin("Failed to start hostapd", error=True)
             raise Exception("Failed to start hostapd. Check your wireless adapter.")
 
         app.logger.log_evil_twin("Starting DHCP server")
-        dnsmasq_proc = subprocess.Popen(["dnsmasq", "-C", str(dnsmasq_path), "-d"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        dnsmasq_proc = _popen_to_logs(
+            ["dnsmasq", "-C", str(dnsmasq_path), "-d"],
+            dnsmasq_stdout,
+            dnsmasq_stderr,
+        )
+        original_settings["dnsmasq_proc"] = dnsmasq_proc
         time.sleep(2)
         if dnsmasq_proc.poll() is not None:
             app.logger.log_evil_twin("Failed to start dnsmasq", error=True)
@@ -521,9 +558,21 @@ def run_evil_twin_attack_impl(app, mode: str = "psk") -> None:
                     ap_status = "[bold red]Error"
                     app.logger.log_evil_twin("Service crashed, attempting restart")
                     if hostapd_proc.poll() is not None:
-                        hostapd_proc = subprocess.Popen(["hostapd", str(hostapd_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        _close_popen_logs(hostapd_proc)
+                        hostapd_proc = _popen_to_logs(
+                            ["hostapd", str(hostapd_path)],
+                            hostapd_stdout,
+                            hostapd_stderr,
+                        )
+                        original_settings["hostapd_proc"] = hostapd_proc
                     if dnsmasq_proc.poll() is not None:
-                        dnsmasq_proc = subprocess.Popen(["dnsmasq", "-C", str(dnsmasq_path), "-d"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        _close_popen_logs(dnsmasq_proc)
+                        dnsmasq_proc = _popen_to_logs(
+                            ["dnsmasq", "-C", str(dnsmasq_path), "-d"],
+                            dnsmasq_stdout,
+                            dnsmasq_stderr,
+                        )
+                        original_settings["dnsmasq_proc"] = dnsmasq_proc
                 status_table.add_row(ssid, str(channel), security_str, ap_status, time_str)
 
                 now = time.time()
@@ -700,9 +749,12 @@ def cleanup_evil_twin(app, original_settings, log_dir=None) -> None:
         except Exception:
             pass
 
-        app.logger.log_evil_twin("Stopping all related processes")
-        for proc in ["hostapd", "dnsmasq", "dhcpd", "wpa_supplicant"]:
-            subprocess.run(["killall", "-9", proc], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        app.logger.log_evil_twin("Stopping session hostapd/dnsmasq processes")
+        for key in ("hostapd_proc", "dnsmasq_proc"):
+            proc = original_settings.get(key)
+            terminate_process(proc, timeout=3)
+            _close_popen_logs(proc)
+            original_settings[key] = None
 
         if "ip_forward" in original_settings:
             app.logger.log_evil_twin("Resetting IP forwarding")

@@ -4,12 +4,17 @@ from cleanup.iptables import (
     FILTER_CHAIN,
     INPUT_CHAIN,
     LAN_CIDR,
+    MITM_NAT_CHAIN,
     NAT_CHAIN,
     PRE_CHAIN,
     apply_evil_twin_nat,
+    apply_mitm_nat,
     evil_twin_nat_setup_commands,
     evil_twin_nat_teardown_commands,
+    mitm_nat_setup_commands,
+    mitm_nat_teardown_commands,
     remove_evil_twin_nat,
+    remove_mitm_nat,
 )
 
 
@@ -129,6 +134,43 @@ class EvilTwinIptablesTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             apply_evil_twin_nat(ap_iface="wlan0", wan_iface="eth0", run=runner)
+
+
+class MitmNatTests(unittest.TestCase):
+    def test_setup_uses_dedicated_chain_only(self):
+        commands = mitm_nat_setup_commands(out_iface="eth0")
+        joined = [" ".join(cmd) for cmd in commands]
+        self.assertFalse(any(_is_global_table_flush(cmd) for cmd in commands))
+        self.assertIn(f"iptables -t nat -N {MITM_NAT_CHAIN}", joined)
+        self.assertTrue(any(cmd[-1] == "MASQUERADE" and MITM_NAT_CHAIN in cmd for cmd in commands))
+        self.assertTrue(any("POSTROUTING" in cmd and MITM_NAT_CHAIN in cmd for cmd in commands))
+
+    def test_setup_rejects_unsafe_interface_names(self):
+        with self.assertRaises(ValueError):
+            mitm_nat_setup_commands(out_iface="eth0; iptables -F")
+
+    def test_teardown_never_flushes_builtin_tables(self):
+        commands = mitm_nat_teardown_commands(out_iface="eth0")
+        self.assertFalse(any(_is_global_table_flush(cmd) for cmd in commands))
+        self.assertFalse(any(cmd == ["iptables", "-F"] for cmd in commands))
+        self.assertFalse(any("iptables-restore" in cmd for cmd in commands))
+        self.assertTrue(any(cmd == ["iptables", "-t", "nat", "-F", MITM_NAT_CHAIN] for cmd in commands))
+        self.assertTrue(any(cmd == ["iptables", "-t", "nat", "-X", MITM_NAT_CHAIN] for cmd in commands))
+
+    def test_apply_installs_after_teardown(self):
+        recorded: list[list[str]] = []
+
+        def runner(command):
+            recorded.append(list(command))
+            return 0
+
+        apply_mitm_nat(out_iface="wlan0", run=runner)
+        self.assertTrue(any("-D" in cmd and MITM_NAT_CHAIN in cmd for cmd in recorded))
+        self.assertTrue(any(cmd[-1] == "MASQUERADE" for cmd in recorded))
+        self.assertFalse(any(_is_global_table_flush(cmd) for cmd in recorded))
+
+    def test_remove_ignores_runner_errors(self):
+        remove_mitm_nat(out_iface="wlan0", run=lambda _command: 1)
 
 
 if __name__ == "__main__":

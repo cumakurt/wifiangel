@@ -116,7 +116,17 @@ class PacketParsingTests(unittest.TestCase):
         self.assertEqual(observation.src, "22:33:44:55:66:77")
         self.assertEqual(observation.dst, "11:22:33:44:55:66")
 
-    def test_client_observation_tods_uses_addr1_as_bssid(self):
+    def test_client_observation_uses_dot11_type_when_outer_type_differs(self):
+        dot11 = FakeLayer(
+            type=2,
+            addr1="11:22:33:44:55:66",
+            addr2="22:33:44:55:66:77",
+            addr3="aa:bb:cc:dd:ee:ff",
+        )
+        packet = FakePacket({"Dot11": dot11}, frame_type=0)
+        observation = parse_client_observation(packet)
+        self.assertIsNotNone(observation)
+        self.assertEqual(observation.bssid, "aa:bb:cc:dd:ee:ff")
         dot11 = FakeLayer(
             FCfield=0x1,
             addr1="aa:bb:cc:dd:ee:ff",

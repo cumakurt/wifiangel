@@ -5,6 +5,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH}"
 
 VENV="$ROOT/.venv"
 STATE_FILE="$ROOT/.run-state"
@@ -245,6 +246,32 @@ pkg_installed() {
   esac
 }
 
+role_commands() {
+  case "$1" in
+    python) echo "python3" ;;
+    venv) echo "python3" ;;
+    aircrack) echo "airmon-ng airodump-ng aireplay-ng" ;;
+    hashcat) echo "hashcat" ;;
+    hcxdumptool) echo "hcxdumptool" ;;
+    iproute) echo "ip" ;;
+    iw) echo "iw" ;;
+    *) echo "" ;;
+  esac
+}
+
+role_label() {
+  case "$1" in
+    python) echo "Python 3.8+" ;;
+    venv) echo "Python venv module" ;;
+    aircrack) echo "aircrack-ng (airmon-ng, airodump-ng, aireplay-ng)" ;;
+    hashcat) echo "hashcat" ;;
+    hcxdumptool) echo "hcxdumptool" ;;
+    iproute) echo "iproute2 (ip)" ;;
+    iw) echo "iw" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 collect_missing_roles() {
   local roles=()
   local py
@@ -260,26 +287,53 @@ collect_missing_roles() {
   need_cmd hcxdumptool || roles+=(hcxdumptool)
   need_cmd ip || roles+=(iproute)
   need_cmd iw || roles+=(iw)
-  printf '%s\n' "${roles[@]+"${roles[@]}"}"
+  if [[ "${#roles[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s\n' "${roles[@]}"
+}
+
+read_nonempty_lines() {
+  local -n _out="$1"
+  _out=()
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    _out+=("$line")
+  done
 }
 
 packages_for_roles() {
-  local role pkg
+  local role pkg token
   local -a out=()
   for role in "$@"; do
     [[ -n "$role" ]] || continue
     pkg="$(pkg_for_role "$role")"
     [[ -n "$pkg" ]] || continue
-    local token
     for token in $pkg; do
-      if ! pkg_installed "$token"; then
-        out+=("$token")
-      fi
+      out+=("$token")
     done
   done
   if [[ "${#out[@]}" -gt 0 ]]; then
     printf '%s\n' "${out[@]}"
   fi
+}
+
+print_missing_report() {
+  local -a roles=("$@")
+  local role pkg cmds state
+  err "[!] Missing tools (need these commands on PATH):"
+  for role in "${roles[@]}"; do
+    pkg="$(pkg_for_role "$role")"
+    cmds="$(role_commands "$role")"
+    state="not installed"
+    if [[ -n "$pkg" ]] && pkg_installed "$pkg"; then
+      state="package installed, command still missing"
+    fi
+    err "    - $(role_label "$role")"
+    err "      commands: ${cmds:-$role}"
+    err "      package:  ${pkg:-unknown for $PKG_MGR} ($state)"
+  done
 }
 
 refresh_pkg_index() {
@@ -342,46 +396,70 @@ check_privileges() {
   die "Installing system packages needs root. Install sudo or re-run as root."
 }
 
-install_system_dependencies() {
-  local -a roles pkgs unique=()
-  mapfile -t roles < <(collect_missing_roles)
-  if [[ "${#roles[@]}" -eq 0 ]]; then
-    return 0
-  fi
-  if [[ "$PKG_MGR" == "unknown" ]]; then
-    err "[!] Linux distribution could not be supported automatically."
-    err "[!] Missing packages: ${roles[*]}"
-    err "[!] Install them with your package manager, then re-run ./run.sh"
-    exit 1
-  fi
-  mapfile -t pkgs < <(packages_for_roles "${roles[@]}")
-  if [[ "${#pkgs[@]}" -eq 0 ]]; then
-    err "[!] Missing tools remain: ${roles[*]}"
-    err "[!] Matching packages are already installed or unavailable. Install the tools manually."
-    exit 1
-  fi
-  local pkg
-  for pkg in "${pkgs[@]}"; do
-    local seen=0
-    local u
+dedupe_list() {
+  local -a items=("$@")
+  local -a unique=()
+  local pkg seen u
+  for pkg in "${items[@]}"; do
+    [[ -n "$pkg" ]] || continue
+    seen=0
     for u in "${unique[@]+"${unique[@]}"}"; do
-      [[ "$u" == "$pkg" ]] && seen=1 && break
+      if [[ "$u" == "$pkg" ]]; then
+        seen=1
+        break
+      fi
     done
     if [[ "$seen" -eq 0 ]]; then
       unique+=("$pkg")
     fi
   done
+  if [[ "${#unique[@]}" -gt 0 ]]; then
+    printf '%s\n' "${unique[@]}"
+  fi
+}
+
+install_system_dependencies() {
+  local -a roles=() pkgs=() unique=()
+  read_nonempty_lines roles < <(collect_missing_roles)
+  if [[ "${#roles[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  print_missing_report "${roles[@]}"
+  if [[ "$PKG_MGR" == "unknown" ]]; then
+    err "[!] Linux distribution could not be supported automatically."
+    err "[!] Install the packages above, then re-run ./run.sh"
+    exit 1
+  fi
+  read_nonempty_lines pkgs < <(packages_for_roles "${roles[@]}")
+  read_nonempty_lines unique < <(dedupe_list "${pkgs[@]+"${pkgs[@]}"}")
+  if [[ "${#unique[@]}" -eq 0 ]]; then
+    err "[!] No package names mapped for: ${roles[*]}"
+    exit 1
+  fi
   check_privileges
-  log "[+] Installing missing system packages"
+  log "[+] Installing missing system packages: ${unique[*]}"
   refresh_pkg_index
   if ! install_packages "${unique[@]}"; then
     err "[!] Failed to install: ${unique[*]}"
+    err "[!] Install manually, for example:"
+    case "$PKG_MGR" in
+      apt) err "    apt-get install -y ${unique[*]}" ;;
+      dnf) err "    dnf install -y ${unique[*]}" ;;
+      yum) err "    yum install -y ${unique[*]}" ;;
+      pacman) err "    pacman -S --needed ${unique[*]}" ;;
+      zypper) err "    zypper install ${unique[*]}" ;;
+      apk) err "    apk add ${unique[*]}" ;;
+      emerge) err "    emerge --noreplace ${unique[*]}" ;;
+    esac
     exit 1
   fi
-  mapfile -t roles < <(collect_missing_roles)
+  hash -r 2>/dev/null || true
+  roles=()
+  read_nonempty_lines roles < <(collect_missing_roles)
   if [[ "${#roles[@]}" -gt 0 ]]; then
-    err "[!] Still missing after install: ${roles[*]}"
-    err "[!] Install them with your package manager, then re-run ./run.sh"
+    err "[!] Still missing after installing: ${unique[*]}"
+    print_missing_report "${roles[@]}"
+    err "[!] Install those packages manually, then re-run ./run.sh"
     exit 1
   fi
 }
@@ -423,7 +501,7 @@ setup_environment() {
 }
 
 deps_satisfied() {
-  "$VENV/bin/python" -c 'import rich, scapy, netifaces, psutil, bleak' 2>/dev/null
+  "$VENV/bin/python" -c 'import rich, scapy, netifaces, bleak, zeroconf' 2>/dev/null
 }
 
 install_app_dependencies() {

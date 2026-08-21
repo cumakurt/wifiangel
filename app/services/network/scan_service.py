@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gc
 import os
 import subprocess
 import threading
@@ -21,7 +20,6 @@ from wifi.airodump_csv import (
     ap_row_to_network_fields,
     parse_airodump_csv,
     probed_essids_by_bssid,
-    station_client_counts,
     station_client_signals,
 )
 from wifi.probes import summarize_probe_ssids
@@ -37,6 +35,7 @@ def run_airodump_scan_loop(app) -> None:
     csv_path = Path(f"{prefix}-01.csv")
     argv = airodump_network_discovery(app.interface_name, prefix, write_interval=1)
     proc: Optional[subprocess.Popen] = None
+    last_stat: Optional[tuple[int, int]] = None
     try:
         proc = subprocess.Popen(
             argv,
@@ -52,9 +51,14 @@ def run_airodump_scan_loop(app) -> None:
             if not csv_path.is_file():
                 continue
             try:
+                stat = csv_path.stat()
+                current = (int(stat.st_mtime_ns), int(stat.st_size))
+                if last_stat == current:
+                    continue
+                last_stat = current
                 aps, stas = parse_airodump_csv(csv_path)
-                by_bssid = station_client_counts(stas)
                 station_signals = station_client_signals(stas)
+                by_bssid = {bssid: set(macs) for bssid, macs in station_signals.items()}
                 probed_map = probed_essids_by_bssid(stas)
                 probe_stats = summarize_probe_ssids(stas)
                 now = datetime.now()
@@ -183,7 +187,6 @@ def run_scan_networks(app, *, live_table: bool = True) -> None:
                 except Exception:
                     pass
             app.logger.info("Network scan stopped")
-            gc.collect()
 
 
 def handle_packet(app, pkt) -> None:

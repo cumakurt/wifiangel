@@ -370,14 +370,36 @@ def run_deauth_burst(app, target: CaptureTarget, strategy: DeauthStrategy, sessi
         session.notes.append(f"Deauth burst failed: {exc}")
 
 
+_QUALITY_CACHE: dict[tuple[str, int, int], CaptureQualityReport] = {}
+_QUALITY_CACHE_LIMIT = 64
+
+
+def _analyze_capture_quality_cached(path: Path, *, bssid: str, essid: str) -> CaptureQualityReport:
+    try:
+        stat = path.stat()
+        key = (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return analyze_capture_quality(path, bssid=bssid, essid=essid)
+    cached = _QUALITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    report = analyze_capture_quality(path, bssid=bssid, essid=essid)
+    _QUALITY_CACHE[key] = report
+    overflow = len(_QUALITY_CACHE) - _QUALITY_CACHE_LIMIT
+    if overflow > 0:
+        for stale in list(_QUALITY_CACHE)[:overflow]:
+            _QUALITY_CACHE.pop(stale, None)
+    return report
+
+
 def analyze_best_capture(session: CaptureSession, target: CaptureTarget) -> Optional[CaptureQualityReport]:
     reports = []
     for path in sorted(session.session_dir.glob(f"{session.output_prefix.name}*.cap")):
         if not path.is_file():
             continue
-        reports.append(analyze_capture_quality(path, bssid=target.bssid, essid=target.ssid))
+        reports.append(_analyze_capture_quality_cached(path, bssid=target.bssid, essid=target.ssid))
     if session.pmkid_hash.exists() and session.pmkid_hash.stat().st_size > 0:
-        reports.append(analyze_capture_quality(session.pmkid_hash, bssid=target.bssid, essid=target.ssid))
+        reports.append(_analyze_capture_quality_cached(session.pmkid_hash, bssid=target.bssid, essid=target.ssid))
     if not reports:
         return None
     return max(reports, key=lambda report: (report.score, report.path))

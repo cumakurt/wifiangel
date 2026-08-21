@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +36,54 @@ from adapters.system_tools import (
 )
 from app.safety import redact_sensitive_text
 from app.ui.theme import BORDER_STYLE
+from cleanup import apply_mitm_nat, remove_mitm_nat
+
+_MITM_PING_WORKERS = 32
+_MITM_PROGRESS_EVERY = 40
+
+
+def host_is_reachable(ip: str, *, timeout: float = 1.5) -> bool:
+    """Return True when a single ICMP echo succeeds."""
+    try:
+        result = subprocess.run(
+            ping_probe_command(ip, count=1, timeout_seconds=1),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        return int(result.returncode) == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def probe_subnet_hosts(
+    network_prefix: str,
+    *,
+    skip_ip: str,
+    cancel: threading.Event,
+    workers: int = _MITM_PING_WORKERS,
+    on_progress=None,
+) -> list[str]:
+    """Ping .1-.254 in parallel; skip skip_ip. Honors cancel between completions."""
+    targets = [f"{network_prefix}{i}" for i in range(1, 255) if f"{network_prefix}{i}" != skip_ip]
+    found: list[str] = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        future_map = {executor.submit(host_is_reachable, ip): ip for ip in targets}
+        for future in as_completed(future_map):
+            completed += 1
+            if on_progress and (completed == 1 or completed % _MITM_PROGRESS_EVERY == 0 or completed == len(targets)):
+                on_progress(completed, len(targets))
+            try:
+                if not future.cancelled() and future.result():
+                    found.append(future_map[future])
+            except Exception:
+                continue
+            if cancel.is_set():
+                for pending in future_map:
+                    pending.cancel()
+                break
+    return found
 
 
 def run_mitm_attack(app) -> None:
@@ -123,36 +172,26 @@ def run_mitm_attack_impl(app) -> None:
     signal.signal(signal.SIGINT, _mitm_scan_sigint)
     try:
         app.console.print("[bold cyan]Scanning network for live hosts (Ctrl+C to cancel)...[/]")
-        last_report = 0
-        for i in range(1, 255):
+        reachable = probe_subnet_hosts(
+            network_prefix,
+            skip_ip=selected_ip,
+            cancel=scan_cancel,
+            on_progress=lambda done, total: app.console.print(
+                f"[dim]Probe {done}/{total} ({int(100 * done / total) if total else 0}%)...[/]"
+            ),
+        )
+        for ip in reachable:
             if scan_cancel.is_set():
                 break
-            if i == 1 or i - last_report >= 40:
-                pct = int(100 * i / 254)
-                app.console.print(f"[dim]Probe {i}/254 ({pct}%)...[/]")
-                last_report = i
-            ip = f"{network_prefix}{i}"
-            if ip == selected_ip:
-                continue
             try:
-                result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "0.2", ip],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=0.5,
-                )
-                if result.returncode == 0:
-                    try:
-                        hostname = socket.gethostbyaddr(ip)[0]
-                    except OSError:
-                        hostname = "Unknown"
-                    try:
-                        mac = app.get_mac(ip, selected_iface)
-                    except Exception:
-                        mac = "Unknown"
-                    online_hosts[ip] = {"hostname": hostname, "mac": mac}
-            except (subprocess.TimeoutExpired, OSError, Exception):
-                pass
+                hostname = socket.gethostbyaddr(ip)[0]
+            except OSError:
+                hostname = "Unknown"
+            try:
+                mac = app.get_mac(ip, selected_iface) or "Unknown"
+            except Exception:
+                mac = "Unknown"
+            online_hosts[ip] = {"hostname": hostname, "mac": mac}
     finally:
         signal.signal(signal.SIGINT, saved_sigint)
 
@@ -234,19 +273,14 @@ arp.spoof on"""
     app.console.print("\n[bold green]Man in the Middle Assessment Setup[/]")
     app.console.print(f"[bold cyan]Preparing assessment on {target_desc} via {selected_iface}...[/]")
     original_ip_forward = None
-    original_iptables = []
+    app._mitm_out_iface = selected_iface
     try:
         with open("/proc/sys/net/ipv4/ip_forward", "r") as f:
             original_ip_forward = f.read().strip()
-        result = subprocess.run(["iptables", "-t", "nat", "-S"], capture_output=True, text=True)
-        original_iptables = result.stdout
         app.console.print("[bold blue]Enabling IP forwarding...[/]")
         subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], stdout=subprocess.DEVNULL)
         app.console.print("[bold blue]Setting up traffic forwarding rules...[/]")
-        subprocess.run(
-            ["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", selected_iface, "-j", "MASQUERADE"],
-            stdout=subprocess.DEVNULL,
-        )
+        apply_mitm_nat(out_iface=selected_iface)
         app.console.print("[bold blue]Stopping any running BetterCAP instances...[/]")
         subprocess.run(["pkill", "-x", "bettercap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(traffic_log, "w") as f:
@@ -255,9 +289,8 @@ arp.spoof on"""
         app.console.print("[bold green]Starting BetterCAP and preparing assessment environment...[/]")
         bettercap_stdout_file = open(os.path.join(log_dir, "bettercap_stdout.log"), "w")
         bettercap_stderr_file = open(os.path.join(log_dir, "bettercap_stderr.log"), "w")
-        bettercap_cmd = f"bettercap -iface {selected_iface} -caplet {bettercap_script}"
         bettercap_process = subprocess.Popen(
-            bettercap_cmd.split(),
+            bettercap_command(selected_iface, str(bettercap_script)),
             stdout=bettercap_stdout_file,
             stderr=bettercap_stderr_file,
             universal_newlines=True,
@@ -269,7 +302,7 @@ arp.spoof on"""
                 bettercap_stdout_file.close()
             if "bettercap_stderr_file" in locals() and not bettercap_stderr_file.closed:
                 bettercap_stderr_file.close()
-            app._restore_settings(original_ip_forward, original_iptables)
+            app._restore_settings(original_ip_forward, None)
             return
 
         app.console.print("\n[bold white on red]Ctrl+C stops the MITM session when you are done.[/]")
@@ -462,7 +495,7 @@ arp.spoof on"""
                     bettercap_stdout_file.close()
                 if "bettercap_stderr_file" in locals() and not bettercap_stderr_file.closed:
                     bettercap_stderr_file.close()
-                app._restore_settings(original_ip_forward, original_iptables, bettercap_process)
+                app._restore_settings(original_ip_forward, None, bettercap_process)
                 app.console.print(f"\n[bold green]Assessment completed. All logs saved to {log_dir}[/]")
                 if attack_stats["sensitive_matches"]:
                     app.console.print("\n[bold red]Redacted Findings Summary:[/]")
@@ -475,16 +508,20 @@ arp.spoof on"""
     except Exception as exc:
         app.console.print(f"\n[bold red]Error during MITM assessment: {str(exc)}[/]")
         traceback.print_exc()
-        if "original_ip_forward" in locals() and "original_iptables" in locals():
+        if "original_ip_forward" in locals():
             app._restore_settings(
                 original_ip_forward,
-                original_iptables,
+                None,
                 bettercap_process if "bettercap_process" in locals() else None,
             )
 
 
-def restore_settings(app, original_ip_forward, original_iptables, bettercap_process=None) -> None:
-    """Restore system settings after MITM assessment."""
+def restore_settings(app, original_ip_forward, original_iptables=None, bettercap_process=None) -> None:
+    """Restore forwarding and scoped MITM NAT after an assessment.
+
+    ``original_iptables`` is unused and kept only for call-site compatibility.
+    NAT teardown uses WIFIANGEL_MITM_NAT and never flushes host tables.
+    """
     app.console.print("[bold blue]Restoring system settings...[/]")
 
     if bettercap_process:
@@ -515,17 +552,14 @@ def restore_settings(app, original_ip_forward, original_iptables, bettercap_proc
         except Exception:
             app.console.print("[red]Failed to restore IP forwarding[/]")
 
-    if original_iptables:
-        try:
-            app.command_runner.run(["iptables-restore"], input=original_iptables, text=True)
-            app.console.print("[green]Firewall rules restored[/]")
-        except Exception:
-            try:
-                app.command_runner.run(["iptables", "-F"])
-                app.command_runner.run(["iptables", "-t", "nat", "-F"])
-                app.console.print("[yellow]Firewall rules flushed[/]")
-            except Exception:
-                app.console.print("[red]Failed to restore firewall rules[/]")
+    out_iface = getattr(app, "_mitm_out_iface", None)
+    try:
+        remove_mitm_nat(out_iface=out_iface)
+        app.console.print("[green]Scoped MITM NAT rules removed[/]")
+    except Exception as exc:
+        app.logger.error(f"Failed to remove scoped MITM NAT rules: {exc}")
+        app.console.print("[red]Failed to remove scoped MITM NAT rules[/]")
+    app._mitm_out_iface = None
 
 
 def format_bytes(bytes_value):

@@ -3,13 +3,32 @@
 from __future__ import annotations
 
 import sys
+import time
+
+from cleanup import remove_evil_twin_nat, remove_mitm_nat
+
+_SCAN_TEARDOWN_SECONDS = 1.5
 
 
-def cleanup_and_exit(app) -> None:
-    """Perform cleanup before exiting the application."""
+def cleanup_and_exit(app, exit_code: int = 0) -> None:
+    """Stop scan children, drop lab NAT, restore managed mode, then exit."""
+    was_scanning = bool(getattr(app, "scanning", False))
     app.scanning = False
     app.console.print("[bold yellow]Performing cleanup...[/]")
     app.logger.info("Cleanup process started")
+
+    if was_scanning:
+        time.sleep(_SCAN_TEARDOWN_SECONDS)
+
+    try:
+        remove_evil_twin_nat()
+    except Exception as exc:
+        app.logger.error(f"Error removing Evil Twin NAT during exit: {exc}")
+
+    try:
+        remove_mitm_nat(out_iface=getattr(app, "_mitm_out_iface", None))
+    except Exception as exc:
+        app.logger.error(f"Error removing MITM NAT during exit: {exc}")
 
     try:
         iface = getattr(app, "interface_name", None)
@@ -22,4 +41,4 @@ def cleanup_and_exit(app) -> None:
         app.logger.error(f"Error during cleanup: {str(exc)}")
         app.console.print(f"[bold red]Error during cleanup: {str(exc)}[/]")
 
-    sys.exit(0)
+    sys.exit(int(exit_code))

@@ -11,6 +11,18 @@ from config.defaults import LOGS_ROOT
 from reports import generate_security_report
 
 
+def _add_file_handler(logger: logging.Logger, path: Path, formatter: logging.Formatter) -> logging.FileHandler:
+    logger.propagate = False
+    abs_path = str(path.resolve())
+    for existing in logger.handlers:
+        if getattr(existing, "baseFilename", None) == abs_path:
+            return existing  # type: ignore[return-value]
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    return handler
+
+
 class Logger:
     def __init__(self) -> None:
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -38,52 +50,31 @@ class Logger:
             "%(asctime)s - %(src)s - %(dst)s - %(bytes)s - %(protocol)s"
         )
 
-        self.main_handler = logging.FileHandler(self.main_log)
-        self.main_handler.setFormatter(detailed_formatter)
-
-        self.attack_handler = logging.FileHandler(self.attack_log)
-        self.attack_handler.setFormatter(attack_formatter)
-
-        self.network_handler = logging.FileHandler(self.network_log)
-        self.network_handler.setFormatter(network_formatter)
-
-        self.client_handler = logging.FileHandler(self.client_log)
-        self.client_handler.setFormatter(client_formatter)
-
-        self.evil_twin_handler = logging.FileHandler(self.evil_twin_log)
-        self.evil_twin_handler.setFormatter(evil_twin_formatter)
-
-        self.dns_handler = logging.FileHandler(self.dns_log)
-        self.dns_handler.setFormatter(dns_formatter)
-
-        self.traffic_handler = logging.FileHandler(self.traffic_log)
-        self.traffic_handler.setFormatter(traffic_formatter)
-
-        self.logger.addHandler(self.main_handler)
+        self.main_handler = _add_file_handler(self.logger, self.main_log, detailed_formatter)
 
         self.attack_logger = logging.getLogger("WiFiAngel.Attacks")
         self.attack_logger.setLevel(logging.INFO)
-        self.attack_logger.addHandler(self.attack_handler)
+        self.attack_handler = _add_file_handler(self.attack_logger, self.attack_log, attack_formatter)
 
         self.network_logger = logging.getLogger("WiFiAngel.Networks")
         self.network_logger.setLevel(logging.INFO)
-        self.network_logger.addHandler(self.network_handler)
+        self.network_handler = _add_file_handler(self.network_logger, self.network_log, network_formatter)
 
         self.client_logger = logging.getLogger("WiFiAngel.Clients")
         self.client_logger.setLevel(logging.INFO)
-        self.client_logger.addHandler(self.client_handler)
+        self.client_handler = _add_file_handler(self.client_logger, self.client_log, client_formatter)
 
         self.evil_twin_logger = logging.getLogger("WiFiAngel.EvilTwin")
         self.evil_twin_logger.setLevel(logging.INFO)
-        self.evil_twin_logger.addHandler(self.evil_twin_handler)
+        self.evil_twin_handler = _add_file_handler(self.evil_twin_logger, self.evil_twin_log, evil_twin_formatter)
 
         self.dns_logger = logging.getLogger("WiFiAngel.DNS")
         self.dns_logger.setLevel(logging.INFO)
-        self.dns_logger.addHandler(self.dns_handler)
+        self.dns_handler = _add_file_handler(self.dns_logger, self.dns_log, dns_formatter)
 
         self.traffic_logger = logging.getLogger("WiFiAngel.Traffic")
         self.traffic_logger.setLevel(logging.INFO)
-        self.traffic_logger.addHandler(self.traffic_handler)
+        self.traffic_handler = _add_file_handler(self.traffic_logger, self.traffic_log, traffic_formatter)
 
     def log_attack(self, attack_type: str, message: str, **kwargs):
         extra = {"attack_type": attack_type}
@@ -104,10 +95,15 @@ class Logger:
         self.info(f"Client: {client_mac} - {message}")
 
     def log_evil_twin(self, message: str, **kwargs):
+        is_error = bool(kwargs.pop("error", False))
         extra = {"evil_twin": kwargs.get("ssid", "Unknown")}
         extra.update(kwargs)
-        self.evil_twin_logger.info(message, extra=extra)
-        self.info(f"Evil Twin: {message}")
+        if is_error:
+            self.evil_twin_logger.error(message, extra=extra)
+            self.error(f"Evil Twin: {message}")
+        else:
+            self.evil_twin_logger.info(message, extra=extra)
+            self.info(f"Evil Twin: {message}")
 
     def log_dns_query(self, client_ip: str, query: str, query_type: str):
         extra = {
