@@ -1,7 +1,5 @@
 # WiFiAngel
 
-![WiFiAngel banner](banner.png)
-
 WiFiAngel is an interactive **terminal (TUI)** application for **authorized** wireless security work on Linux. It uses [Rich](https://github.com/Textualize/rich) for menus and live tables, and orchestrates common Wi‑Fi and lab tools: **aircrack-ng**, **hcxdumptool** / **hcxtools**, **hashcat**, **hostapd**, **dnsmasq**, **bettercap**, **reaver**, and others.
 
 **Use only on networks and equipment you own or have explicit written permission to test.** Unauthorized interception of networks or traffic is illegal in most jurisdictions.
