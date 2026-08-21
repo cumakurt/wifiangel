@@ -12,6 +12,7 @@ auto_hack_sessions/
 myenv/
 .venv/
 venv/
+.run-state
 *.egg-info/
 dist/
 build/

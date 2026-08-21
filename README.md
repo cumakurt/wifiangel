@@ -140,6 +140,15 @@ On startup, **`app.main`** also runs **`warn_optional_missing_tools`** so you se
 ```bash
 git clone <repository-url>
 cd wifiangel
+chmod +x run.sh
+./run.sh
+```
+
+`run.sh` installs required system packages (when the distro/package manager is known), creates `.venv` from `requirements.txt`, and starts the TUI. WiFiAngel still needs **root** at runtime, so the script re-execs with `sudo` if you launched it as a normal user.
+
+Manual install remains:
+
+```bash
 pip install -r requirements.txt
 ```
 
@@ -148,6 +157,12 @@ pip install -r requirements.txt
 ## Quick start
 
 From the repository root:
+
+```bash
+./run.sh
+```
+
+Equivalent:
 
 ```bash
 sudo python3 wifiangel.py
