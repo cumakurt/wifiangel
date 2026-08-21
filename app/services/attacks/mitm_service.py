@@ -248,7 +248,7 @@ arp.spoof on"""
             stdout=subprocess.DEVNULL,
         )
         app.console.print("[bold blue]Stopping any running BetterCAP instances...[/]")
-        subprocess.run(["pkill", "-f", "bettercap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-x", "bettercap"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(traffic_log, "w") as f:
             f.write(f"# Traffic log started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Interface: {selected_iface}, IP: {selected_ip}, Gateway: {selected_gateway}\n\n")
@@ -499,7 +499,7 @@ def restore_settings(app, original_ip_forward, original_iptables, bettercap_proc
             app.console.print("[yellow]Failed to stop BetterCAP gracefully[/]")
 
     app.command_runner.run(
-        ["pkill", "-9", "-f", "bettercap"],
+        ["pkill", "-9", "-x", "bettercap"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -588,7 +588,7 @@ def start_bettercap(app, interface, target_ip, gateway, script_path=None):
     try:
         app.console.print("[bold yellow]Stopping any running BetterCAP instances...[/]")
         app.command_runner.run(
-            ["pkill", "-9", "-f", "bettercap"],
+            ["pkill", "-9", "-x", "bettercap"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

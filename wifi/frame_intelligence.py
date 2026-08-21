@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+_RSN_SUITE_CAP = 16
+
 
 _CIPHER_NAMES = {
     0: "Use group cipher",
@@ -105,17 +107,19 @@ def parse_rsn_information(info: bytes | bytearray | memoryview) -> Optional[RsnP
         group_cipher = _suite_name(data[offset : offset + 4], _CIPHER_NAMES, "cipher")
         offset += 4
 
-        pairwise_count = int.from_bytes(data[offset : offset + 2], "little")
-        offset += 2
+        pairwise_count, offset = _rsn_suite_count(data, offset)
         pairwise = []
         for _ in range(pairwise_count):
+            if offset + 4 > len(data):
+                break
             pairwise.append(_suite_name(data[offset : offset + 4], _CIPHER_NAMES, "cipher"))
             offset += 4
 
-        akm_count = int.from_bytes(data[offset : offset + 2], "little")
-        offset += 2
+        akm_count, offset = _rsn_suite_count(data, offset)
         akms = []
         for _ in range(akm_count):
+            if offset + 4 > len(data):
+                break
             akms.append(_suite_name(data[offset : offset + 4], _AKM_NAMES, "akm"))
             offset += 4
 
@@ -202,9 +206,9 @@ def analyze_pcap_frames(path: Path, *, limit: int = 50000) -> FrameIntelligenceR
     reader_cls = PcapNgReader if path.suffix.lower() == ".pcapng" else PcapReader
     with reader_cls(str(path)) as reader:
         for pkt in reader:
-            total += 1
-            if total > limit:
+            if total >= limit:
                 break
+            total += 1
             frame_counts[classify_dot11_packet(pkt)] += 1
             dot11 = _get_layer(pkt, "Dot11")
             if dot11 is not None:
@@ -230,6 +234,14 @@ def analyze_pcap_frames(path: Path, *, limit: int = 50000) -> FrameIntelligenceR
         pmf_capable_networks=sum(1 for profile in unique_profiles if profile.pmf_capable),
         wpa3_networks=sum(1 for profile in unique_profiles if profile.wpa3_capable),
     )
+
+
+def _rsn_suite_count(raw: bytes, offset: int) -> tuple[int, int]:
+    if offset + 2 > len(raw):
+        return 0, offset
+    count = int.from_bytes(raw[offset : offset + 2], "little")
+    count = max(0, min(_RSN_SUITE_CAP, count))
+    return count, offset + 2
 
 
 def _suite_name(suite: bytes, names: dict[int, str], kind: str) -> str:

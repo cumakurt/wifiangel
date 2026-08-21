@@ -29,6 +29,9 @@ def run_tools_menu(app) -> None:
                 ("14", "Capture Health Checker"),
                 ("15", "WPS Risk Analyzer"),
                 ("16", "Channel Hopper Optimizer"),
+                ("17", "Technical intelligence"),
+                ("18", "Network hopper"),
+                ("19", "Generate HTML session report"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -51,6 +54,9 @@ def run_tools_menu(app) -> None:
             "14": app.capture_health_checker,
             "15": app.wps_risk_analyzer,
             "16": app.channel_hopper_optimizer,
+            "17": app.technical_intelligence,
+            "18": app.network_hopper,
+            "19": app.generate_session_report,
         }
         if choice == "0":
             return

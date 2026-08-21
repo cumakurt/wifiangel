@@ -12,10 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from adapters.system_tools import terminate_process
 from attacks.commands import airodump_network_discovery
+from app.services.runtime_helpers import ensure_networks_lock, snapshot_networks
 from app.ui import create_scan_results_table
 from config import TMP_DIR
-from wifi.airodump_csv import ap_row_to_network_fields, parse_airodump_csv, station_client_counts
+from wifi.airodump_csv import ap_row_to_network_fields, parse_airodump_csv, station_client_counts, station_client_signals
 from wifi.packets import get_security_info as packet_get_security_info
 from wifi.packets import parse_client_observation, parse_network_observation
 
@@ -45,8 +47,9 @@ def run_airodump_scan_loop(app) -> None:
             try:
                 aps, stas = parse_airodump_csv(csv_path)
                 by_bssid = station_client_counts(stas)
+                station_signals = station_client_signals(stas)
                 now = datetime.now()
-                with app._networks_lock:
+                with ensure_networks_lock(app):
                     for ap in aps:
                         fields = ap_row_to_network_fields(ap)
                         if not fields:
@@ -58,31 +61,38 @@ def run_airodump_scan_loop(app) -> None:
                         cipher_str = str(fields["cipher"])
                         beacons = int(fields["beacons"])
                         wps = bool(fields["wps"])
+                        data_packets = int(fields.get("data_packets") or 0)
                         st_clients = by_bssid.get(bssid, set())
+                        client_signals = dict(station_signals.get(bssid, {}))
                         if bssid not in app.networks:
                             app.networks[bssid] = {
                                 "ssid": ssid_val,
                                 "signal": sig,
                                 "cipher": cipher_str,
                                 "clients": set(st_clients),
+                                "client_signals": client_signals,
                                 "channel": ch if ch > 0 else 0,
                                 "first_seen": now,
                                 "last_seen": now,
                                 "packets": beacons,
-                                "data_packets": 0,
+                                "data_packets": data_packets,
                                 "wps": wps,
                             }
                         else:
                             prev = app.networks[bssid]
                             merged_clients = set(prev["clients"])
                             merged_clients.update(st_clients)
+                            merged_signals = dict(prev.get("client_signals") or {})
+                            merged_signals.update(client_signals)
                             upd = {
                                 "last_seen": now,
                                 "signal": sig,
                                 "packets": max(prev["packets"], beacons),
+                                "data_packets": max(prev.get("data_packets", 0), data_packets),
                                 "cipher": cipher_str,
                                 "wps": wps or prev.get("wps", False),
                                 "clients": merged_clients,
+                                "client_signals": merged_signals,
                             }
                             if ch > 0:
                                 upd["channel"] = ch
@@ -97,15 +107,7 @@ def run_airodump_scan_loop(app) -> None:
                 if app.scanning:
                     app.logger.error(f"airodump CSV merge error: {exc}")
     finally:
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        terminate_process(proc, timeout=3)
         try:
             for p in prefix.parent.glob(prefix.name + "*"):
                 p.unlink(missing_ok=True)
@@ -135,8 +137,7 @@ def run_scan_networks(app, *, live_table: bool = True) -> None:
         except Exception:
             pass
 
-    if not hasattr(app, "_networks_lock"):
-        app._networks_lock = threading.Lock()
+    ensure_networks_lock(app)
 
     max_workers = 2 if live_table else 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -174,7 +175,7 @@ def handle_packet(app, pkt) -> None:
     try:
         network_observation = parse_network_observation(pkt)
         if network_observation:
-            with app._networks_lock:
+            with ensure_networks_lock(app):
                 bssid = network_observation.bssid
                 ch = network_observation.channel
                 if ch <= 0:
@@ -216,7 +217,7 @@ def handle_packet(app, pkt) -> None:
         if not client_observation:
             return
 
-        with app._networks_lock:
+        with ensure_networks_lock(app):
             bssid = client_observation.bssid
             if bssid in app.networks:
                 app.networks[bssid]["data_packets"] += 1
@@ -244,7 +245,7 @@ def render_results_table(app) -> None:
         return
     table = create_scan_results_table()
 
-    for idx, (bssid, data) in enumerate(app.networks.items(), 1):
+    for idx, (bssid, data) in enumerate(snapshot_networks(app), 1):
         table.add_row(
             str(idx),
             bssid,

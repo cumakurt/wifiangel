@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from typing import Iterable, Mapping, Optional, Sequence, Union
 
+_PROCESS_WAIT_TIMEOUT = 2.0
+
 
 Command = Union[Sequence[str], str]
 
@@ -110,6 +112,7 @@ class CommandRunner:
             return None
 
         kwargs = {
+            "stdin": subprocess.DEVNULL,
             "stdout": stdout,
             "stderr": stderr,
             "bufsize": bufsize,
@@ -123,14 +126,23 @@ class CommandRunner:
         return subprocess.Popen(list(args), **kwargs)
 
     def kill_processes(self, process_names: Iterable[str], *, force: bool = True) -> None:
+        """Stop processes by exact comm name (not a command-line substring)."""
         for process_name in process_names:
-            self.run(["pkill", "-f", process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.run(["pkill", "-x", process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if force:
-                self.run(["pkill", "-9", "-f", process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.run(["pkill", "-9", "-x", process_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def set_wireless_channel(self, interface: str, channel: int | str) -> CommandResult:
+        channel_s = str(channel)
+        result = self.run(
+            ["iw", "dev", interface, "set", "channel", channel_s],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.ok or result.dry_run:
+            return result
         return self.run(
-            ["iwconfig", interface, "channel", str(channel)],
+            ["iwconfig", interface, "channel", channel_s],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -147,3 +159,20 @@ class CommandRunner:
     @staticmethod
     def format(command: Sequence[str]) -> str:
         return " ".join(shlex.quote(str(part)) for part in command)
+
+
+def terminate_process(process: Optional[subprocess.Popen], *, timeout: float = _PROCESS_WAIT_TIMEOUT) -> None:
+    """Terminate a child process without leaking zombies."""
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        process.wait(timeout=timeout)
+    except Exception:
+        try:
+            process.kill()
+            process.wait(timeout=1)
+        except Exception:
+            pass

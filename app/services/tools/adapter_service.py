@@ -51,8 +51,11 @@ def run_change_channel(app) -> None:
     channel = Prompt.ask("Enter new channel number (1-14 or 36-165)")
     try:
         channel = int(channel)
-        app.command_runner.set_wireless_channel(app.interface_name, channel)
-        app.console.print(f"[bold green]Channel changed to {channel}![/]")
+        result = app.command_runner.set_wireless_channel(app.interface_name, channel)
+        if result.ok:
+            app.console.print(f"[bold green]Channel changed to {channel}![/]")
+        else:
+            app.console.print(f"[bold red]Could not set channel {channel} on {app.interface_name}.[/]")
     except ValueError:
         app.console.print("[bold red]Invalid channel number![/]")
 

@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from rich.prompt import Prompt
 
+from app.services.runtime_helpers import selected_network_record
 from app.ui import render_menu_panel, target_banner
 
 
 def run_attack_menu(app) -> None:
     while True:
-        if app.selected_network:
-            network = app.networks[app.selected_network]
-            target_banner(app.console, str(network["ssid"]), app.selected_network)
+        record = selected_network_record(app)
+        if record:
+            bssid, network = record
+            target_banner(app.console, str(network["ssid"]), bssid)
+        elif app.selected_network:
+            app.selected_network = None
 
         render_menu_panel(
             app.console,

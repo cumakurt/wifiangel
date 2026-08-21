@@ -93,7 +93,7 @@ def best_artifacts_by_identity(artifacts: list[CaptureArtifact]) -> dict[str, Ca
 def infer_artifact_identity(path: Path) -> tuple[str, str]:
     name = path.stem
     bssid = ""
-    match = re.search(r"(?i)([0-9a-f]{2}[:_-]?){5}[0-9a-f]{2}", name)
+    match = re.search(r"(?i)(?:[0-9a-f]{2}[:_-]){5}[0-9a-f]{2}", name)
     if match:
         plain = re.sub(r"[^0-9a-fA-F]", "", match.group(0)).lower()
         if len(plain) == 12:

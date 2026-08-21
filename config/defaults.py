@@ -61,17 +61,18 @@ WIFI_ANGEL_SESSION_BINARIES = (
     "hcxdumptool",
 )
 
+# Hard requirements to start the TUI (must match WIFI_ANGEL_SESSION_BINARIES).
 REQUIRED_SYSTEM_TOOLS = {
     "aircrack-ng": ("aircrack-ng", "airmon-ng", "airodump-ng", "aireplay-ng"),
     "hashcat": ("hashcat",),
     "hcxdumptool": ("hcxdumptool",),
+}
+
+OPTIONAL_SYSTEM_TOOLS = {
     "hostapd": ("hostapd",),
     "dnsmasq": ("dnsmasq",),
     "macchanger": ("macchanger",),
     "reaver": ("reaver",),
-}
-
-OPTIONAL_SYSTEM_TOOLS = {
     "bettercap": ("bettercap",),
     "hcxpcapngtool": ("hcxpcapngtool",),
     "wpaclean": ("wpaclean",),

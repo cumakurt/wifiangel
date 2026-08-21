@@ -49,6 +49,14 @@ def hashcat_crack(
     return command
 
 
+def hashcat_mode_for_hash_file(hash_file: PathLike) -> int:
+    """Select hashcat mode from hash file suffix (hcxpcapngtool emits 22000)."""
+    suffix = Path(hash_file).suffix.lower()
+    if suffix == ".16800":
+        return 16800
+    return 22000
+
+
 def hcxpcapngtool_convert(output_file: PathLike, input_file: PathLike) -> List[str]:
     return ["hcxpcapngtool", "-o", str(output_file), str(input_file)]
 

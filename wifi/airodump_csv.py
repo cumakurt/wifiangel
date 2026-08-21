@@ -49,6 +49,8 @@ def parse_airodump_csv(path: Path) -> tuple[list[dict[str, str]], list[dict[str,
 
     raw_text = path.read_text(encoding="utf-8", errors="replace")
     lines = raw_text.splitlines()
+    if lines and lines[-1].count(",") < 3:
+        lines = lines[:-1]
     ap_header_idx = None
     sta_header_idx = None
     for i, line in enumerate(lines):
@@ -128,9 +130,13 @@ def ap_row_to_network_fields(ap: dict[str, str]) -> dict[str, Any] | None:
             wps = True
             break
     if not wps:
-        blob = " ".join(ap.values()).upper()
-        if "WPS" in blob and "NO WPS" not in blob:
-            wps = True
+        privacy_tokens = {token for token in privacy.upper().replace("/", " ").split() if token}
+        wps = "WPS" in privacy_tokens
+
+    data_packets = _int_field(
+        _col_match(ap, "#", "data") or _col_match(ap, "data") or _col_match(ap, "#", "iv") or _col_match(ap, "iv") or "",
+        0,
+    )
 
     return {
         "bssid": bssid,
@@ -140,12 +146,18 @@ def ap_row_to_network_fields(ap: dict[str, str]) -> dict[str, Any] | None:
         "cipher": cipher_str,
         "beacons": beacons,
         "wps": wps,
+        "data_packets": data_packets,
     }
 
 
 def station_client_counts(stations: list[dict[str, str]]) -> dict[str, set[str]]:
     """BSSID -> set of associated station MACs."""
-    out: dict[str, set[str]] = {}
+    return {bssid: set(macs) for bssid, macs in station_client_signals(stations).items()}
+
+
+def station_client_signals(stations: list[dict[str, str]]) -> dict[str, dict[str, int]]:
+    """BSSID -> {station MAC: last observed power}."""
+    out: dict[str, dict[str, int]] = {}
     for s in stations:
         smac = ""
         for key, val in s.items():
@@ -161,7 +173,8 @@ def station_client_counts(stations: list[dict[str, str]]) -> dict[str, set[str]]
         ap = _norm_mac(bssid_raw)
         if not ap:
             continue
-        out.setdefault(ap, set()).add(smac)
+        power = _int_field(_col_match(s, "power") or s.get("Power", ""), -100)
+        out.setdefault(ap, {})[smac] = power
     return out
 
 

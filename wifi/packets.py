@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 _IEEE_SSID_MAX = 32
+_RSN_SUITE_CAP = 16
+_INVALID_MACS = {"", "00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}
 
 
 @dataclass(frozen=True)
@@ -38,12 +40,12 @@ def parse_network_observation(pkt) -> Optional[NetworkObservation]:
     bssid = getattr(dot11, "addr3", None)
     if not bssid:
         return None
-    bssid_l = str(bssid).lower().replace("-", ":")
-    if bssid_l in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+    bssid_l = _norm_mac(bssid)
+    if not bssid_l:
         return None
 
     return NetworkObservation(
-        bssid=bssid,
+        bssid=bssid_l,
         ssid=get_ssid(pkt),
         channel=get_channel(pkt),
         signal=get_signal(pkt),
@@ -57,14 +59,27 @@ def parse_client_observation(pkt) -> Optional[ClientObservation]:
         return None
 
     dot11 = _get_layer(pkt, "Dot11")
-    bssid = getattr(dot11, "addr3", None)
+    addr1 = _norm_mac(getattr(dot11, "addr1", None))
+    addr2 = _norm_mac(getattr(dot11, "addr2", None))
+    addr3 = _norm_mac(getattr(dot11, "addr3", None))
+    fc = _dot11_fc_int(dot11)
+    to_ds = bool(fc & 0x1)
+    from_ds = bool(fc & 0x2)
+    if to_ds and not from_ds:
+        bssid, src, dst = addr1, addr2, addr3
+    elif from_ds and not to_ds:
+        bssid, src, dst = addr2, addr3, addr1
+    elif to_ds and from_ds:
+        bssid, src, dst = addr1, addr2, addr3
+    else:
+        bssid, src, dst = addr3, addr2, addr1
     if not bssid:
         return None
 
     return ClientObservation(
         bssid=bssid,
-        src=getattr(dot11, "addr2", None),
-        dst=getattr(dot11, "addr1", None),
+        src=src or None,
+        dst=dst or None,
     )
 
 
@@ -293,13 +308,14 @@ def _rsn_has_wpa3_akm(rsn_info: bytes) -> bool:
         offset = 2  # version
         offset += 4  # group cipher suite
 
-        pairwise_count = int.from_bytes(rsn_info[offset : offset + 2], "little")
-        offset += 2 + (pairwise_count * 4)
+        pairwise_count, offset = _rsn_suite_count(rsn_info, offset)
+        offset += pairwise_count * 4
 
-        akm_count = int.from_bytes(rsn_info[offset : offset + 2], "little")
-        offset += 2
+        akm_count, offset = _rsn_suite_count(rsn_info, offset)
 
         for _ in range(akm_count):
+            if offset + 4 > len(rsn_info):
+                break
             suite = rsn_info[offset : offset + 4]
             offset += 4
             if len(suite) == 4 and suite[:3] == b"\x00\x0f\xac" and suite[3] in {8, 18}:
@@ -418,3 +434,29 @@ def _decode_ssid_for_display(raw: bytes) -> str:
     s = "".join(ch if ch.isprintable() else " " for ch in s)
     s = " ".join(s.split())
     return s.strip()
+
+
+def _norm_mac(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", ":")
+    if text in _INVALID_MACS:
+        return ""
+    parts = text.split(":")
+    if len(parts) != 6 or any(len(part) != 2 for part in parts):
+        return ""
+    return text
+
+
+def _dot11_fc_int(dot11) -> int:
+    fc = getattr(dot11, "FCfield", 0)
+    try:
+        return int(fc)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rsn_suite_count(raw: bytes, offset: int) -> tuple[int, int]:
+    if offset + 2 > len(raw):
+        return 0, offset
+    count = int.from_bytes(raw[offset : offset + 2], "little")
+    count = max(0, min(_RSN_SUITE_CAP, count))
+    return count, offset + 2

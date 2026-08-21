@@ -67,7 +67,9 @@ def build_client_profiles(
             )
             entry["networks"].add(str(network.get("ssid", "Unknown")))
             entry["bssids"].add(str(bssid))
-            entry["best_signal"] = max(entry["best_signal"], _safe_int(network.get("signal", -100), -100))
+            client_signals = network.get("client_signals") or {}
+            if mac in client_signals:
+                entry["best_signal"] = max(entry["best_signal"], _safe_int(client_signals.get(mac), -100))
             entry["client_hits"] += 1
 
     profiles = []

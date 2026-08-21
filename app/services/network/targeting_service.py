@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from app.ui import BORDER_STYLE
+from app.services.runtime_helpers import snapshot_networks
 
 
 def run_network_hopper(app) -> None:
@@ -55,7 +56,8 @@ def run_network_hopper(app) -> None:
 
 def run_select_target_network(app) -> None:
     """Allow user to select a target network."""
-    if not app.networks:
+    networks = snapshot_networks(app)
+    if not networks:
         app.console.print("[error]No networks found. Scan first.[/]")
         return
 
@@ -68,7 +70,7 @@ def run_select_target_network(app) -> None:
     table.add_column("Security", style="red")
     table.add_column("Clients", style="cyan", justify="center")
 
-    for idx, (bssid, network) in enumerate(app.networks.items(), 1):
+    for idx, (bssid, network) in enumerate(networks, 1):
         table.add_row(
             str(idx),
             bssid,
@@ -86,9 +88,9 @@ def run_select_target_network(app) -> None:
         choice = int(Prompt.ask("Enter network number"))
         if choice == 0:
             return
-        if 1 <= choice <= len(app.networks):
-            app.selected_network = list(app.networks.keys())[choice - 1]
-            network = app.networks[app.selected_network]
+        if 1 <= choice <= len(networks):
+            app.selected_network = networks[choice - 1][0]
+            network = networks[choice - 1][1]
             app.console.print(f"\n[success]Selected network: {network['ssid']} ({app.selected_network})[/]")
             app.logger.info(f"Selected target network: {network['ssid']} ({app.selected_network})")
         else:

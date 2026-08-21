@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from adapters.system_tools import CommandRunner
-from wifi.capture_quality import analyze_capture_quality
+from attacks.parsers import has_aircrack_handshake
+from wifi.capture_quality import analyze_capture_quality, PCAP_ANALYZE_LIMIT
 from wifi.channel_hopper import ChannelPlanEntry, build_adaptive_channel_plan
 from wifi.client_profiler import vendor_from_mac
 
@@ -143,8 +144,8 @@ def validate_handshake_pmkid(
     aircrack_result = "not-run"
     if command_runner.which("aircrack-ng"):
         result = command_runner.run(["aircrack-ng", str(path)], capture_output=True)
-        out = f"{result.stdout}\n{result.stderr}".lower()
-        if "1 handshake" in out or "handshake" in out:
+        out = f"{result.stdout}\n{result.stderr}"
+        if has_aircrack_handshake(out):
             aircrack_result = "valid"
             notes.append("aircrack-ng detected handshake material")
         elif result.ok:
@@ -381,6 +382,8 @@ def _check_pcap_health(path: Path) -> CaptureHealthReport:
     try:
         with reader_cls(str(path)) as reader:
             for pkt in reader:
+                if total >= PCAP_ANALYZE_LIMIT:
+                    break
                 total += 1
                 if pkt is None:
                     corrupted += 1

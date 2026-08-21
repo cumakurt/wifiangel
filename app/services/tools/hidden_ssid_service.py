@@ -26,7 +26,7 @@ from wifi.airodump_csv import (
 
 def run_hidden_ssid_discovery(app) -> None:
     """Discover hidden SSIDs using the same passive discovery path as the main network scan."""
-    was_in_monitor_mode = app.interface_name.endswith("mon")
+    was_in_monitor_mode = app.wifi_adapter.is_monitor_mode(app.interface_name)
 
     if not was_in_monitor_mode:
         app.console.print("[bold blue]Interface is not in monitor mode, switching to monitor mode...[/]")
@@ -267,17 +267,7 @@ def run_hidden_ssid_discovery(app) -> None:
         if not was_in_monitor_mode:
             app.console.print("\n[bold blue]Switching back to managed mode...[/]")
             try:
-                subprocess.run(
-                    ["airmon-ng", "stop", app.interface_name],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                if app.interface_name.endswith("mon"):
-                    app.interface_name = app.interface_name[:-3]
-                subprocess.run(["ip", "link", "set", app.interface_name, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["iw", app.interface_name, "set", "type", "managed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["ip", "link", "set", app.interface_name, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                app.interface_name = app.wifi_adapter.set_managed_mode(app.interface_name)
                 app.console.print(f"[bold green]Successfully switched back to managed mode: {app.interface_name}[/]")
                 app.logger.info(f"Switched back to managed mode: {app.interface_name}")
             except Exception as exc:

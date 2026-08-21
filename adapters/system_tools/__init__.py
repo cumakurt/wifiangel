@@ -7,7 +7,7 @@ from .network import (
     parse_mac_from_arp_output,
     ping_probe_command,
 )
-from .runner import CommandResult, CommandRunner
+from .runner import CommandResult, CommandRunner, terminate_process
 from .speed import (
     DOWNLOAD_TEST_BYTES,
     UPLOAD_TEST_BYTES,
@@ -61,5 +61,6 @@ __all__ = [
     "ping_probe_command",
     "ping_command",
     "speed_gauge_blocks",
+    "terminate_process",
     "upload_speed_rating",
 ]

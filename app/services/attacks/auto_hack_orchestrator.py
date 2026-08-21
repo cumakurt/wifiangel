@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from adapters.system_tools import managed_name_from_monitor
+from app.services.runtime_helpers import ensure_networks_lock
 from config import AUTO_HACK_SESSIONS_DIR, DEFAULT_WORDLIST, ROCKYOU_WORDLIST
 
 
@@ -63,8 +64,7 @@ def run_auto_hack(app) -> None:
             return
 
         app.console.print("[bold blue]2. Network discovery via airodump-ng (60 seconds, same as menu scan)...[/]")
-        if not hasattr(app, "_networks_lock"):
-            app._networks_lock = threading.Lock()
+        ensure_networks_lock(app)
         with app._networks_lock:
             app.networks.clear()
         app.scanning = True
@@ -258,8 +258,8 @@ def run_auto_hack(app) -> None:
                     app._auto_hack_cleanup()
                     return
 
-        max_parallel_attacks = min(4, len(networks_with_clients))
-        app.console.print(f"[bold blue]4. Starting parallel assessments on {len(networks_with_clients)} networks (max {max_parallel_attacks} at once)...[/]")
+        max_parallel_attacks = 1
+        app.console.print(f"[bold blue]4. Starting sequential assessments on {len(networks_with_clients)} networks (one radio)...[/]")
         attack_results = []
         attack_progress = {"lock": threading.Lock(), "active": {}}
         total_nets = len(networks_with_clients)
@@ -274,7 +274,7 @@ def run_auto_hack(app) -> None:
                     )
             parts = [Text.assemble(("Finished ", "bold"), (f"{finished}/{total_nets}", "green bold"), ("  ", ""), ("|  ", "dim"), ("Each network capture typically runs ~3-5 minutes before this step advances.", "dim"))]
             parts.append(Group(*rows) if rows else Text("  Starting workers...", style="dim"))
-            return Panel(Group(*parts), title="[bold]Step 4 · Parallel assessments[/]", subtitle="[dim]Live status from capture loop[/]", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
+            return Panel(Group(*parts), title="[bold]Step 4 · Sequential assessments[/]", subtitle="[dim]Live status from capture loop[/]", border_style="cyan", box=box.ROUNDED, padding=(0, 1))
 
         executor = ThreadPoolExecutor(max_workers=max_parallel_attacks)
         future_to_network = {}

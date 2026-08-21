@@ -38,6 +38,8 @@ class AirodumpCsvTests(unittest.TestCase):
             self.assertEqual(nf["ssid"], "TestSSID")
             self.assertEqual(nf["channel"], 6)
             self.assertEqual(nf["signal"], -45)
+            self.assertFalse(nf["wps"])
+            self.assertEqual(nf["data_packets"], 0)
             self.assertIn("WPA2", nf["cipher"])
             counts = station_client_counts(stas)
             self.assertEqual(counts.get("aa:bb:cc:dd:ee:ff"), {"11:22:33:44:55:66"})
@@ -61,6 +63,35 @@ Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ES
             self.assertEqual(probed.get("aa:bb:cc:dd:ee:ff"), {"GuestWiFi"})
         finally:
             path.unlink(missing_ok=True)
+
+    def test_wps_not_inferred_from_essid_text(self):
+        row = {
+            "BSSID": "AA:BB:CC:DD:EE:FF",
+            "ESSID": "CafeWPSFree",
+            "channel": "6",
+            "Power": "-40",
+            "Privacy": "WPA2",
+            "Cipher": "CCMP",
+            "Authentication": "PSK",
+        }
+        fields = ap_row_to_network_fields(row)
+        assert fields is not None
+        self.assertFalse(fields["wps"])
+        self.assertEqual(fields["ssid"], "CafeWPSFree")
+
+    def test_wps_from_privacy_token(self):
+        row = {
+            "BSSID": "AA:BB:CC:DD:EE:FF",
+            "ESSID": "Lab",
+            "channel": "1",
+            "Power": "-50",
+            "Privacy": "WPA2 WPS",
+            "Cipher": "CCMP",
+            "Authentication": "PSK",
+        }
+        fields = ap_row_to_network_fields(row)
+        assert fields is not None
+        self.assertTrue(fields["wps"])
 
     def test_missing_file(self):
         aps, stas = parse_airodump_csv(Path("/nonexistent/no.csv"))

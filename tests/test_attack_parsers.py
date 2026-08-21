@@ -38,6 +38,9 @@ Index number of target network ?
         self.assertTrue(has_aircrack_handshake(output))
         self.assertTrue(has_aircrack_handshake(output, "aa:bb:cc:dd:ee:ff"))
         self.assertFalse(has_aircrack_handshake(output, "00:11:22:33:44:55"))
+        self.assertTrue(has_aircrack_handshake("WPA (2 handshake) AA:BB:CC:DD:EE:FF"))
+        self.assertFalse(has_aircrack_handshake("WPA (0 handshake) AA:BB:CC:DD:EE:FF"))
+        self.assertFalse(has_aircrack_handshake("no handshake data"))
 
     def test_extract_aircrack_password(self):
         output = "KEY FOUND! [ correct horse 1 ]"
@@ -69,6 +72,7 @@ Index number of target network ?
         self.assertFalse(is_valid_wifi_password("00:00:05"))
         self.assertFalse(is_valid_wifi_password("10 seconds"))
         self.assertFalse(is_valid_wifi_password("progress 50%"))
+        self.assertTrue(is_valid_wifi_password("masterkey123"))
         self.assertIsNone(extract_wifi_password("KEY FOUND! [ 00:00:05 ]"))
 
 

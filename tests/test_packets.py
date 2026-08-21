@@ -116,6 +116,32 @@ class PacketParsingTests(unittest.TestCase):
         self.assertEqual(observation.src, "22:33:44:55:66:77")
         self.assertEqual(observation.dst, "11:22:33:44:55:66")
 
+    def test_client_observation_tods_uses_addr1_as_bssid(self):
+        dot11 = FakeLayer(
+            FCfield=0x1,
+            addr1="aa:bb:cc:dd:ee:ff",
+            addr2="22:33:44:55:66:77",
+            addr3="11:22:33:44:55:66",
+        )
+        packet = FakePacket({"Dot11": dot11}, frame_type=2)
+        observation = parse_client_observation(packet)
+        self.assertEqual(observation.bssid, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(observation.src, "22:33:44:55:66:77")
+        self.assertEqual(observation.dst, "11:22:33:44:55:66")
+
+    def test_client_observation_fromds_uses_addr2_as_bssid(self):
+        dot11 = FakeLayer(
+            FCfield=0x2,
+            addr1="11:22:33:44:55:66",
+            addr2="aa:bb:cc:dd:ee:ff",
+            addr3="22:33:44:55:66:77",
+        )
+        packet = FakePacket({"Dot11": dot11}, frame_type=2)
+        observation = parse_client_observation(packet)
+        self.assertEqual(observation.bssid, "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(observation.src, "22:33:44:55:66:77")
+        self.assertEqual(observation.dst, "11:22:33:44:55:66")
+
     def test_ssid_respects_ie_length_field(self):
         """Long trailing buffer must not be treated as part of the SSID."""
         dot11 = FakeLayer(addr3="aa:bb:cc:dd:ee:ff")

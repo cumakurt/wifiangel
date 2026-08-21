@@ -10,15 +10,16 @@ from rich.live import Live
 from rich.table import Table
 
 from app.ui import BORDER_STYLE
+from app.services.runtime_helpers import require_selected_network, selected_network_record, snapshot_networks
+from config import CHANNELS_2GHZ, CHANNELS_5GHZ
 
 
 def run_signal_analyzer(app) -> None:
     """Analyze WiFi signal strength and quality."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
-
-    network = app.networks[app.selected_network]
+    bssid, _network = record
     signal_data = []
 
     def create_signal_table():
@@ -35,11 +36,16 @@ def run_signal_analyzer(app) -> None:
     try:
         with Live(create_signal_table(), refresh_per_second=2) as live:
             while True:
+                current = selected_network_record(app)
+                if not current or current[0] != bssid:
+                    app.console.print("\n[bold yellow]Selected network is no longer available.[/]")
+                    return
+                _, network = current
                 current_time = datetime.now().strftime("%H:%M:%S")
                 signal_strength = network["signal"]
                 interference = "Low"
-                for other_bssid, other_net in app.networks.items():
-                    if other_bssid != app.selected_network and abs(other_net["channel"] - network["channel"]) <= 1:
+                for other_bssid, other_net in snapshot_networks(app):
+                    if other_bssid != bssid and abs(other_net["channel"] - network["channel"]) <= 1:
                         interference = "High"
                         break
                 signal_data.append((current_time, signal_strength, interference))
@@ -51,8 +57,8 @@ def run_signal_analyzer(app) -> None:
 
 def run_channel_optimizer(app) -> None:
     """Analyze and suggest best channel for WiFi operation."""
-    channel_usage = {i: 0 for i in range(1, 15)}
-    channel_usage.update({i: 0 for i in [36, 40, 44, 48, 52, 56, 60, 64]})
+    channel_usage = {i: 0.0 for i in CHANNELS_2GHZ}
+    channel_usage.update({i: 0.0 for i in CHANNELS_5GHZ})
     for network in app.networks.values():
         channel = network["channel"]
         if channel in channel_usage:
@@ -60,7 +66,7 @@ def run_channel_optimizer(app) -> None:
             channel_usage[channel] += weight
             if channel <= 14:
                 for i in range(max(1, channel - 2), min(14, channel + 2)):
-                    if i != channel:
+                    if i != channel and i in channel_usage:
                         channel_usage[i] += weight * 0.5
 
     table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE)
@@ -164,3 +170,10 @@ def run_client_analysis(app) -> None:
         for client in network["clients"]:
             table.add_row(client, network["ssid"], network["cipher"], str(network["data_packets"]))
     app.console.print(table)
+
+
+def run_generate_session_report(app) -> None:
+    """Write the current session HTML report from collected logs."""
+    path = app.logger.generate_report()
+    app.console.print(f"[success]HTML report written to {path}[/]")
+    app.logger.info("Session HTML report generated: %s", path)

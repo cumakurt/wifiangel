@@ -9,6 +9,8 @@ from typing import Any, Optional
 
 from wifi.frame_intelligence import classify_dot11_packet
 
+PCAP_ANALYZE_LIMIT = 50_000
+
 
 @dataclass(frozen=True)
 class EapolKeyFrame:
@@ -160,7 +162,9 @@ def _analyze_pcap_file(path: Path, *, bssid: str | None) -> CaptureQualityReport
     try:
         reader_cls = PcapNgReader if path.suffix.lower() == ".pcapng" else PcapReader
         with reader_cls(str(path)) as reader:
-            for pkt in reader:
+            for index, pkt in enumerate(reader):
+                if index >= PCAP_ANALYZE_LIMIT:
+                    break
                 frame_type = classify_dot11_packet(pkt)
                 frame_counts[frame_type] += 1
                 dot11 = _get_layer(pkt, "Dot11")

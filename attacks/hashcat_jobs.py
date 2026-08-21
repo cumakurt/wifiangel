@@ -37,7 +37,7 @@ class HashcatJob:
             status=True,
             potfile_disable=self.potfile_disable,
         )
-        return command[:5] + ["--session", self.session] + command[5:]
+        return insert_hashcat_session(command, self.session)
 
     def restore_command(self) -> list[str]:
         return ["hashcat", "--session", self.session, "--restore"]
@@ -57,7 +57,11 @@ class HashcatJobStore:
         if not self.path.exists():
             return []
         raw = json.loads(self.path.read_text(encoding="utf-8"))
-        return [HashcatJob(**item) for item in raw]
+        jobs = []
+        for item in raw:
+            if isinstance(item, dict):
+                jobs.append(job_from_mapping(item))
+        return jobs
 
     def create_job(
         self,
@@ -109,7 +113,10 @@ class HashcatJobStore:
         return updated
 
     def find_duplicate(self, hash_sha256: str, wordlist: str, mode: int) -> HashcatJob | None:
+        terminal = {"complete", "completed", "failed", "cancelled"}
         for job in self.list_jobs():
+            if job.status.lower() in terminal:
+                continue
             if job.hash_sha256 == hash_sha256 and job.wordlist == wordlist and job.mode == int(mode):
                 return job
         return None
@@ -122,9 +129,26 @@ class HashcatJobStore:
         )
 
 
+def job_from_mapping(item: dict[str, Any]) -> HashcatJob:
+    """Build a job from persisted JSON, ignoring computed keys like command/restore_command."""
+    payload = {key: item[key] for key in HashcatJob.__dataclass_fields__ if key in item}
+    return HashcatJob(**payload)
+
+
 def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def insert_hashcat_session(command: list[str], session: str) -> list[str]:
+    """Insert ``--session`` after ``hashcat -m MODE -a 0`` without slicing option flags."""
+    if not command:
+        return ["hashcat", "--session", session]
+    if "--session" in command:
+        return list(command)
+    if len(command) >= 5 and command[0] == "hashcat" and command[1] == "-m" and command[3] == "-a":
+        return command[:5] + ["--session", session] + command[5:]
+    return [command[0], "--session", session, *command[1:]]

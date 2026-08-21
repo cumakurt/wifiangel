@@ -24,7 +24,7 @@ PASSWORD_PATTERNS = (
 
 
 def has_aircrack_handshake(output: str, bssid: Optional[str] = None) -> bool:
-    if "1 handshake" not in output:
+    if not re.search(r"(?<!\d)([1-9]\d*)\s+handshake", output, re.IGNORECASE):
         return False
     if bssid and bssid.lower() not in output.lower():
         return False
@@ -111,18 +111,11 @@ def is_valid_wifi_password(password: str) -> bool:
     if not password or len(password) < 8 or len(password) > 63:
         return False
 
-    lower = password.lower()
-    invalid_markers = (
-        "second",
-        "minute",
-        "hour",
-        "progress",
-        "remaining",
-        "tested",
-        "decrypting",
-        "master",
-    )
-    if any(marker in lower for marker in invalid_markers):
+    if re.search(
+        r"\b(?:second|minute|hour|progress|remaining|tested|decrypting)\b",
+        password,
+        re.IGNORECASE,
+    ):
         return False
 
     if re.search(r"\d+\s*(?:second|minute|hour)", password, re.IGNORECASE):

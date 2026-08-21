@@ -134,6 +134,8 @@ class WiFiAdapterManager:
 
     def get_interface_type(self, interface: str) -> Optional[str]:
         """Return nl80211 interface type from ``iw dev <iface> info``, or None if unavailable."""
+        if not interface:
+            return None
         result = self.runner.run(
             ["iw", "dev", interface, "info"],
             capture_output=True,
@@ -141,6 +143,15 @@ class WiFiAdapterManager:
         if result.returncode != 0:
             return None
         return parse_iw_dev_info_interface_type(result.stdout)
+
+    def is_monitor_mode(self, interface: Optional[str]) -> bool:
+        """True when the interface is in monitor mode (nl80211 type, then name suffix)."""
+        if not interface:
+            return False
+        iface_type = self.get_interface_type(interface)
+        if iface_type:
+            return iface_type == "monitor"
+        return str(interface).endswith("mon")
 
     def start_monitor_mode(self, interface: str) -> str:
         self.runner.run(["systemctl", "stop", "NetworkManager"], stdout=subprocess.PIPE)
@@ -184,7 +195,11 @@ class WiFiAdapterManager:
             if mon_names:
                 return sorted(mon_names)[0]
 
-        return interface
+        if self.is_monitor_mode(interface) and (net_base / interface).is_dir():
+            return interface
+
+        self.runner.run(["systemctl", "start", "NetworkManager"], stdout=subprocess.PIPE)
+        raise RuntimeError(f"Could not enable monitor mode on {interface}")
 
     def set_managed_mode(self, interface: str, *, restart_network_manager: bool = True) -> str:
         self.runner.run(["airmon-ng", "stop", interface], stdout=subprocess.PIPE)

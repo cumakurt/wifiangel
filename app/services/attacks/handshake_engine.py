@@ -17,7 +17,9 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
+from adapters.system_tools import terminate_process
 from app.safety import sanitize_filename
+from app.services.runtime_helpers import ensure_networks_lock, require_selected_network
 from app.ui import BORDER_STYLE
 from attacks.commands import aireplay_deauth, airodump_capture, hcxdumptool_capture, hcxpcapngtool_convert
 from attacks.hashcat_jobs import HashcatJobStore
@@ -94,11 +96,11 @@ class CaptureSession:
 
 def run_handshake_capture_engine(app) -> None:
     """Capture a handshake with quality scoring, adaptive deauth, promotion, and manifest output."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
-
-    target = build_capture_target(app.selected_network, app.networks[app.selected_network])
+    bssid, network = record
+    target = build_capture_target(bssid, network)
     policy = CapturePolicy()
     session = create_capture_session(app.interface_name, target)
     security_profile = summarize_network_security(
@@ -267,7 +269,7 @@ def create_capture_session(interface: str, target: CaptureTarget) -> CaptureSess
 
 def refresh_target_clients(app, target: CaptureTarget) -> CaptureTarget:
     try:
-        with app._networks_lock:
+        with ensure_networks_lock(app):
             network = app.networks.get(target.bssid, {})
             clients = tuple(sorted(str(client) for client in (network.get("clients", set()) or set())))
     except Exception:
@@ -463,17 +465,7 @@ def write_manifest(session: CaptureSession) -> None:
 
 
 def stop_process(process: Optional[subprocess.Popen]) -> None:
-    if not process:
-        return
-    try:
-        process.terminate()
-        process.wait(timeout=2)
-    except Exception:
-        try:
-            process.kill()
-            process.wait(timeout=1)
-        except Exception:
-            pass
+    terminate_process(process)
 
 
 def _render_capture_status(session: CaptureSession, report: Optional[CaptureQualityReport]) -> Panel:

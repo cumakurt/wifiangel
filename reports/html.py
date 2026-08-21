@@ -43,10 +43,16 @@ def generate_security_report(log_dir: Path, timestamp: str) -> Path:
     return report_file
 
 
-def _read_lines(path: Path) -> list[str]:
+def _read_lines(path: Path, *, max_lines: int = 500, max_bytes: int = 256 * 1024) -> list[str]:
     if not path.exists():
         return []
-    return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    data = path.read_bytes()
+    if len(data) > max_bytes:
+        data = data[-max_bytes:]
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if len(lines) > max_lines:
+        return lines[-max_lines:]
+    return lines
 
 
 def _section(title: str, headers: tuple[str, str, str], lines: list[str]) -> str:

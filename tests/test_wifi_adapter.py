@@ -89,6 +89,32 @@ class WiFiAdapterParsingTests(unittest.TestCase):
 
         self.assertEqual(manager.get_interface_type("wlan0"), "monitor")
 
+    def test_is_monitor_mode_uses_nl80211_type(self):
+        runner = FakeRunner()
+        manager = WiFiAdapterManager(runner)
+
+        class Result:
+            returncode = 0
+            stdout = "\ttype monitor\n"
+            stderr = ""
+
+        runner.run = lambda *a, **k: Result()
+        self.assertTrue(manager.is_monitor_mode("wlan0"))
+        self.assertFalse(manager.is_monitor_mode(""))
+
+    def test_is_monitor_mode_falls_back_to_name_suffix(self):
+        runner = FakeRunner()
+        manager = WiFiAdapterManager(runner)
+
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+
+        runner.run = lambda *a, **k: Result()
+        self.assertTrue(manager.is_monitor_mode("wlan0mon"))
+        self.assertFalse(manager.is_monitor_mode("wlan0"))
+
 class WiFiAdapterManagerTests(unittest.TestCase):
     def test_start_monitor_mode_prefers_mon_suffix_directory(self):
         runner = FakeRunner()
@@ -111,6 +137,17 @@ class WiFiAdapterManagerTests(unittest.TestCase):
             manager = WiFiAdapterManager(runner, sleep=lambda _: None, sys_class_net=nb)
             interface = manager.start_monitor_mode("wlan0")
             self.assertEqual(interface, "wlxtestmon")
+
+    def test_start_monitor_mode_restores_network_manager_on_failure(self):
+        runner = FakeRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            nb = Path(tmp)
+            (nb / "wlan0").mkdir()
+            (nb / "wlan0" / "wireless").mkdir(parents=True)
+            manager = WiFiAdapterManager(runner, sleep=lambda _: None, sys_class_net=nb)
+            with self.assertRaises(RuntimeError):
+                manager.start_monitor_mode("wlan0")
+            self.assertIn(("run", ("systemctl", "start", "NetworkManager")), runner.calls)
 
     def test_set_managed_mode_runs_expected_core_commands(self):
         runner = FakeRunner()

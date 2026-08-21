@@ -112,7 +112,28 @@ class TechnicalIntelligenceTests(unittest.TestCase):
             second = store.create_job(hash_file=hash_file, wordlist=wordlist, mode=22000)
 
             self.assertEqual(first.job_id, second.job_id)
-            self.assertIn("--session", first.command())
+            command = first.command()
+            self.assertEqual(command[:5], ["hashcat", "-m", "22000", "-a", "0"])
+            self.assertEqual(command[5:7], ["--session", first.session])
+            self.assertIn("-w", command)
+
+    def test_hashcat_job_to_dict_round_trips_through_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hash_file = root / "hash.22000"
+            wordlist = root / "words.txt"
+            hash_file.write_text("hash", encoding="utf-8")
+            wordlist.write_text("password123\n", encoding="utf-8")
+            store = HashcatJobStore(root / "jobs.json")
+            job = store.create_job(hash_file=hash_file, wordlist=wordlist, mode=22000)
+            store.path.write_text(
+                __import__("json").dumps([job.to_dict()], indent=2),
+                encoding="utf-8",
+            )
+            loaded = store.list_jobs()
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].job_id, job.job_id)
+            self.assertEqual(loaded[0].mode, 22000)
 
     def test_interface_capability_parser(self):
         output = """
@@ -140,11 +161,13 @@ VHT Capabilities:
                     "ssid": "Lab",
                     "signal": -42,
                     "clients": {"3c:07:54:11:22:33"},
+                    "client_signals": {"3c:07:54:11:22:33": -48},
                 }
             }
         )
 
         self.assertEqual(profiles[0].vendor, "Apple")
+        self.assertEqual(profiles[0].best_signal, -48)
         self.assertGreater(profiles[0].target_score, 0)
         self.assertEqual(vendor_from_mac("00:00:00:00:00:00"), "Unknown")
 

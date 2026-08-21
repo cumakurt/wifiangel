@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
-import time
 
 
 def cleanup_and_exit(app) -> None:
@@ -14,11 +12,10 @@ def cleanup_and_exit(app) -> None:
     app.logger.info("Cleanup process started")
 
     try:
-        subprocess.run(["airmon-ng", "stop", app.interface_name], stdout=subprocess.PIPE)
-        app.logger.info(f"{app.interface_name} switched to managed mode")
-        time.sleep(1)
-        subprocess.run(["systemctl", "start", "NetworkManager"], stdout=subprocess.PIPE)
-        app.logger.info("NetworkManager started")
+        iface = getattr(app, "interface_name", None)
+        if iface:
+            app.interface_name = app.wifi_adapter.set_managed_mode(iface)
+            app.logger.info(f"{app.interface_name} switched to managed mode")
         app.console.print("[bold green]Cleanup completed.[/]")
         app.logger.info("Cleanup completed")
     except Exception as exc:

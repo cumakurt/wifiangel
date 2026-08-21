@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from itertools import islice
+import threading
 from typing import Optional
 
 from rich import box
@@ -93,6 +93,7 @@ from app.services.tools.adapter_service import (
 from app.services.tools.analysis_service import (
     run_channel_optimizer as svc_run_channel_optimizer,
     run_client_analysis as svc_run_client_analysis,
+    run_generate_session_report as svc_run_generate_session_report,
     run_security_audit as svc_run_security_audit,
     run_show_network_stats as svc_run_show_network_stats,
     run_signal_analyzer as svc_run_signal_analyzer,
@@ -132,6 +133,7 @@ class WiFiAngel:
         self.console = Console(theme=TUI_THEME, highlight=True)
         self.networks = {}
         self.clients = {}
+        self._networks_lock = threading.Lock()
         self.interface_name = None
         self.selected_network = None
         self.scanning = False
@@ -237,19 +239,6 @@ class WiFiAngel:
     def pmkid_attack(self):
         """PMKID attack"""
         svc_run_pmkid_attack(self)
-
-    def _read_wordlist_in_chunks(self, wordlist_path, chunk_size=1000):
-        """Read wordlist file in chunks to optimize memory usage"""
-        try:
-            with open(wordlist_path, 'r', encoding='utf-8', errors='ignore') as f:
-                while True:
-                    chunk = list(islice(f, chunk_size))
-                    if not chunk:
-                        break
-                    yield chunk
-        except Exception as e:
-            self.logger.error(f"Error reading wordlist: {str(e)}")
-            yield []
 
     def dictionary_attack(self):
         """Optimized dictionary attack with wordlist"""
@@ -409,6 +398,9 @@ class WiFiAngel:
 
     def channel_hopper_optimizer(self):
         return svc_run_channel_hopper_optimizer(self)
+
+    def generate_session_report(self):
+        return svc_run_generate_session_report(self)
 
     def _speed_test_impl(self):
         return svc_run_speed_test(self)

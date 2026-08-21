@@ -8,6 +8,7 @@ from datetime import datetime
 import subprocess
 import time
 
+from adapters.system_tools import terminate_process
 from app.safety import sanitize_filename
 from attacks.commands import (
     aircrack_check,
@@ -178,7 +179,12 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                             result["handshake_status"] = "[yellow]Needs verification"
 
             if not pmkid_found and pmkid_pcapng.exists():
-                subprocess.run(hcxpcapngtool_convert(pmkid_22000, pmkid_pcapng), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    hcxpcapngtool_convert(pmkid_22000, pmkid_pcapng),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
                 if pmkid_22000.exists() and pmkid_22000.stat().st_size > 0:
                     is_valid_pmkid = app._verify_pmkid(pmkid_22000, bssid)
                     if is_valid_pmkid:
@@ -277,30 +283,5 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
         if attack_progress is not None:
             with attack_progress["lock"]:
                 attack_progress["active"].pop(bssid, None)
-        if dump_proc:
-            try:
-                dump_proc.terminate()
-                dump_proc.wait(timeout=1)
-            except Exception:
-                try:
-                    dump_proc.kill()
-                    dump_proc.wait(timeout=1)
-                except Exception:
-                    pass
-
-        if pmkid_proc:
-            try:
-                pmkid_proc.terminate()
-                try:
-                    pmkid_proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pmkid_proc.kill()
-                    try:
-                        pmkid_proc.wait(timeout=2)
-                    except Exception:
-                        pass
-            except Exception:
-                try:
-                    subprocess.run(["pkill", "-9", "-f", f"hcxdumptool.*{bssid}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+        terminate_process(dump_proc, timeout=1)
+        terminate_process(pmkid_proc)

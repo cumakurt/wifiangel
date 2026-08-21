@@ -54,7 +54,7 @@ def run_main_menu(app) -> None:
                 if not app.start_monitor_mode():
                     continue
             elif choice == "2":
-                if not app.interface_name.endswith("mon"):
+                if not app.wifi_adapter.is_monitor_mode(app.interface_name):
                     app.console.print("[warning]Monitor mode is required for scanning.[/]")
                     app.console.print("[info]Enabling monitor mode automatically...[/]")
                     if not app.start_monitor_mode():
