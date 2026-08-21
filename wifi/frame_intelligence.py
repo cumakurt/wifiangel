@@ -146,19 +146,27 @@ def summarize_network_security(network: dict[str, Any]) -> dict[str, Any]:
     cipher_upper = cipher.upper()
     wpa3 = "WPA3" in cipher_upper or "SAE" in cipher_upper or "OWE" in cipher_upper
     wpa2 = "WPA2" in cipher_upper or "PSK" in cipher_upper
+    wep = "WEP" in cipher_upper
+    enterprise = any(token in cipher_upper for token in ("802.1X", "EAP", "MGT", "ENTERPRISE"))
+    open_network = "OPEN" in cipher_upper and "WPA" not in cipher_upper and not wep
     pmf_required = "PMF-REQUIRED" in cipher_upper or "MFPR" in cipher_upper
     pmf_capable = pmf_required or "PMF" in cipher_upper or wpa3
+    transition_mode = bool(wpa3 and wpa2)
+    # SAE-only / PMF-required: aireplay-ng cannot force a usable EAPOL exchange.
+    passive_capture = bool(not enterprise and not open_network and not wep and (pmf_required or (wpa3 and not wpa2)))
 
-    if wpa3 and wpa2:
+    if enterprise:
+        hint = "802.1X/MGT network; skip PSK handshake and dictionary cracking."
+    elif open_network:
+        hint = "Open network; no WPA handshake recovery path."
+    elif wep:
+        hint = "Legacy WEP network; treat as critical finding."
+    elif wpa3 and wpa2:
         hint = "WPA3 transition mode; deauthentication may work only against WPA2 clients."
     elif wpa3 and pmf_required:
         hint = "PMF required; deauthentication is unlikely to force a usable handshake."
     elif wpa3:
-        hint = "WPA3-capable network; prefer PMKID/SAE-aware capture validation."
-    elif "WEP" in cipher_upper:
-        hint = "Legacy WEP network; treat as critical finding."
-    elif "OPEN" in cipher_upper:
-        hint = "Open network; no WPA handshake recovery path."
+        hint = "WPA3/SAE; prefer passive capture and PMKID over deauthentication."
     else:
         hint = "Standard WPA/WPA2 assessment path."
 
@@ -166,11 +174,51 @@ def summarize_network_security(network: dict[str, Any]) -> dict[str, Any]:
         "ssid": str(network.get("ssid", "Unknown")),
         "cipher": cipher,
         "wpa3": wpa3,
-        "transition_mode": wpa3 and wpa2,
+        "transition_mode": transition_mode,
         "pmf_capable": pmf_capable,
         "pmf_required": pmf_required,
+        "passive_capture": passive_capture,
+        "enterprise": enterprise,
+        "open": open_network,
+        "wep": wep,
+        "akm_label": _akm_label(
+            cipher_upper,
+            wpa3=wpa3,
+            wpa2=wpa2,
+            wep=wep,
+            enterprise=enterprise,
+            open_network=open_network,
+            transition_mode=transition_mode,
+        ),
         "hint": hint,
     }
+
+
+def _akm_label(
+    cipher_upper: str,
+    *,
+    wpa3: bool,
+    wpa2: bool,
+    wep: bool,
+    enterprise: bool,
+    open_network: bool,
+    transition_mode: bool,
+) -> str:
+    if enterprise:
+        return "802.1X"
+    if open_network:
+        return "Open"
+    if wep:
+        return "WEP"
+    if "OWE" in cipher_upper:
+        return "OWE"
+    if transition_mode:
+        return "SAE+PSK (transition)"
+    if wpa3:
+        return "SAE"
+    if wpa2:
+        return "PSK"
+    return "Unknown"
 
 
 def classify_dot11_packet(pkt: Any) -> str:

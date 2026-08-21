@@ -35,6 +35,28 @@ class ReportGenerationTests(unittest.TestCase):
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
             self.assertNotIn("<script>alert(1)</script>", html)
 
+    def test_report_includes_playbook_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            (log_dir / "main.log").write_text("ok\n", encoding="utf-8")
+            report = generate_security_report(
+                log_dir,
+                "20260506_120000",
+                networks={
+                    "aa:bb:cc:dd:ee:ff": {
+                        "ssid": "Lab<script>",
+                        "cipher": "WPA3/SAE",
+                        "clients": set(),
+                        "wps": False,
+                    }
+                },
+            )
+            html = report.read_text(encoding="utf-8")
+            self.assertIn("Assessment playbook", html)
+            self.assertIn("Lab&lt;script&gt;", html)
+            self.assertIn("SAE", html)
+            self.assertIn("PMKID", html)
+
     def test_auto_assessment_report_escapes_html_but_shows_passphrase(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_dir = Path(tmp) / "20260509_120000"

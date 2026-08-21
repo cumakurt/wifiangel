@@ -50,6 +50,8 @@ class TechnicalIntelligenceTests(unittest.TestCase):
 
         self.assertTrue(summary["wpa3"])
         self.assertTrue(summary["transition_mode"])
+        self.assertEqual(summary["akm_label"], "SAE+PSK (transition)")
+        self.assertFalse(summary["passive_capture"])
 
     def test_hash_capture_quality_scores_22000(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +136,26 @@ class TechnicalIntelligenceTests(unittest.TestCase):
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded[0].job_id, job.job_id)
             self.assertEqual(loaded[0].mode, 22000)
+            self.assertEqual(loaded[0].attack_mode, 0)
+
+    def test_hashcat_job_mask_and_rules_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hash_file = root / "hash.22000"
+            wordlist = root / "words.txt"
+            rules = root / "best.rule"
+            hash_file.write_text("hash", encoding="utf-8")
+            wordlist.write_text("password123\n", encoding="utf-8")
+            rules.write_text(":\n", encoding="utf-8")
+            store = HashcatJobStore(root / "jobs.json")
+            dict_job = store.create_job(hash_file=hash_file, wordlist=wordlist, rules=str(rules))
+            mask_job = store.create_job(
+                hash_file=hash_file, wordlist=Path("-"), attack_mode=3, mask="?d?d?d?d"
+            )
+            self.assertIn("-r", dict_job.command())
+            self.assertEqual(mask_job.command()[3:5], ["-a", "3"])
+            self.assertIn("?d?d?d?d", mask_job.command())
+            self.assertEqual(mask_job.restore_command()[-1], "--restore")
 
     def test_interface_capability_parser(self):
         output = """

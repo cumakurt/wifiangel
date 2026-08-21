@@ -6,12 +6,21 @@ import subprocess
 import time
 
 from rich import box
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from app.ui import BORDER_STYLE
+from app.ui import BORDER_STYLE, render_playbook_panel
 from app.services.runtime_helpers import require_selected_network
 from attacks.commands import aireplay_deauth
+from wifi.playbook import recommend_assessment
+
+
+def _confirm_deauth_playbook(app, network) -> bool:
+    playbook = recommend_assessment(network)
+    if not playbook.skip_deauth:
+        return True
+    render_playbook_panel(app.console, playbook)
+    return Confirm.ask("Playbook skipped deauth for this target. Continue anyway?", default=False)
 
 
 def run_deauth_all_clients(app) -> None:
@@ -20,6 +29,8 @@ def run_deauth_all_clients(app) -> None:
     if not record:
         return
     bssid, network = record
+    if not _confirm_deauth_playbook(app, network):
+        return
     clients = list(network.get("clients") or [])
     if not clients:
         app.console.print("[bold yellow]No clients connected to this network.[/]")
@@ -72,6 +83,8 @@ def run_deauth_single_client(app) -> None:
     if not record:
         return
     bssid, network = record
+    if not _confirm_deauth_playbook(app, network):
+        return
     clients = list(network.get("clients") or [])
     if not clients:
         app.console.print("[bold yellow]No clients connected to this network.[/]")

@@ -88,12 +88,15 @@ from app.services.tools.adapter_service import (
     run_change_adapter_mode as svc_run_change_adapter_mode,
     run_change_channel as svc_run_change_channel,
     run_mac_changer as svc_run_mac_changer,
+    run_select_ap_interface as svc_run_select_ap_interface,
+    run_select_capture_interface as svc_run_select_capture_interface,
     run_show_adapter_info as svc_run_show_adapter_info,
 )
 from app.services.tools.analysis_service import (
     run_channel_optimizer as svc_run_channel_optimizer,
     run_client_analysis as svc_run_client_analysis,
     run_generate_session_report as svc_run_generate_session_report,
+    run_probe_ssid_table as svc_run_probe_ssid_table,
     run_security_audit as svc_run_security_audit,
     run_show_network_stats as svc_run_show_network_stats,
     run_signal_analyzer as svc_run_signal_analyzer,
@@ -132,9 +135,11 @@ class WiFiAngel:
 
         self.console = Console(theme=TUI_THEME, highlight=True)
         self.networks = {}
+        self.probe_ssids = ()
         self.clients = {}
         self._networks_lock = threading.Lock()
         self.interface_name = None
+        self.ap_interface = None
         self.selected_network = None
         self.scanning = False
         self.current_menu = "main"
@@ -232,6 +237,12 @@ class WiFiAngel:
 
     def show_adapter_info(self):
         return svc_run_show_adapter_info(self)
+
+    def select_capture_interface(self):
+        return svc_run_select_capture_interface(self)
+
+    def select_ap_interface(self):
+        return svc_run_select_ap_interface(self)
 
     def mac_changer(self):
         return svc_run_mac_changer(self)
@@ -401,6 +412,9 @@ class WiFiAngel:
 
     def generate_session_report(self):
         return svc_run_generate_session_report(self)
+
+    def probe_ssid_table(self):
+        return svc_run_probe_ssid_table(self)
 
     def _speed_test_impl(self):
         return svc_run_speed_test(self)

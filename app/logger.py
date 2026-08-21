@@ -138,5 +138,5 @@ class Logger:
     def debug(self, msg: object, *args: object, **kwargs: Any) -> None:
         self.logger.debug(msg, *args, **kwargs)
 
-    def generate_report(self) -> Path:
-        return generate_security_report(self.log_dir, self.timestamp)
+    def generate_report(self, networks: dict | None = None) -> Path:
+        return generate_security_report(self.log_dir, self.timestamp, networks=networks)

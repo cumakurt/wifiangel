@@ -202,11 +202,48 @@ def probed_essids_by_bssid(stations: list[dict[str, str]]) -> dict[str, set[str]
         if not ap:
             continue
         probed = _col_match(s, "probed", "essid") or (s.get("Probed ESSIDs", "") or "").strip()
-        if not probed:
+        names = parse_probed_essid_field(probed)
+        if not names:
             continue
-        for part in probed.replace(";", ",").split(","):
-            p = part.strip()
-            if not p or p.lower() in ("<hidden network>",):
-                continue
-            out.setdefault(ap, set()).add(p)
+        out.setdefault(ap, set()).update(names)
     return out
+
+
+def parse_probed_essid_field(value: str) -> tuple[str, ...]:
+    """Split an airodump-ng Probed ESSIDs cell into unique names."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in str(value or "").replace(";", ",").split(","):
+        name = part.strip().strip('"').strip("'")
+        if not name or name.lower() in {"<hidden network>", "(not associated)"}:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return tuple(names)
+
+
+def station_probe_rows(stations: list[dict[str, str]]) -> list[tuple[str, str | None, tuple[str, ...]]]:
+    """Return (station_mac, associated_bssid_or_none, probed_ssids) for each station."""
+    rows: list[tuple[str, str | None, tuple[str, ...]]] = []
+    for station in stations:
+        station_mac = ""
+        for key, val in station.items():
+            kl = key.lower()
+            if "station" in kl and "mac" in kl:
+                station_mac = _norm_mac(val)
+                break
+        if not station_mac:
+            continue
+        names = parse_probed_essid_field(
+            _col_match(station, "probed", "essid") or (station.get("Probed ESSIDs", "") or "")
+        )
+        if not names:
+            continue
+        bssid_raw = (station.get("BSSID", "") or "").strip()
+        associated = None
+        if bssid_raw and "not associated" not in bssid_raw.lower():
+            associated = _norm_mac(bssid_raw) or None
+        rows.append((station_mac, associated, names))
+    return rows

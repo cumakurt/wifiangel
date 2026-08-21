@@ -5,6 +5,7 @@ from .components import (
     render_menu_panel,
     render_welcome_banner,
     target_banner,
+    render_playbook_panel,
 )
 from .theme import BORDER_STYLE, M, TUI_THEME
 
@@ -14,6 +15,7 @@ __all__ = [
     "TUI_THEME",
     "create_scan_results_table",
     "render_menu_panel",
+    "render_playbook_panel",
     "render_welcome_banner",
     "target_banner",
 ]

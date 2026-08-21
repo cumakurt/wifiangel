@@ -26,6 +26,9 @@ def snapshot_networks(app) -> list[tuple[str, dict[str, Any]]]:
             clients = data.get("clients")
             if isinstance(clients, (set, list, tuple)):
                 row["clients"] = set(clients)
+            probes = data.get("probes")
+            if isinstance(probes, (set, list, tuple)):
+                row["probes"] = set(probes)
             snapshot.append((bssid, row))
         return snapshot
 
@@ -53,6 +56,21 @@ def require_selected_network(app) -> Optional[tuple[str, dict[str, Any]]]:
     else:
         app.console.print("[bold red]Please select a target network first![/]")
     return None
+
+
+def skip_psk_for_target(app, network: dict[str, Any], *, action: str) -> bool:
+    """Return True when the playbook says not to run PSK capture/crack."""
+    from app.ui import render_playbook_panel
+    from wifi.playbook import recommend_assessment
+
+    playbook = recommend_assessment(network)
+    if not playbook.skip_psk_capture:
+        return False
+    render_playbook_panel(app.console, playbook)
+    app.console.print(
+        f"[warning]Playbook skipped {action} for this target. Use {playbook.menu_label} instead.[/]"
+    )
+    return True
 
 
 def network_is_wpa3(network: Optional[dict[str, Any]]) -> bool:

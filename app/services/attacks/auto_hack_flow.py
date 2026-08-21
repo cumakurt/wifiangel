@@ -19,7 +19,7 @@ from attacks.commands import (
     hcxdumptool_capture,
     hcxpcapngtool_convert,
 )
-from attacks.parsers import extract_hashcat_password_for_bssid, extract_wifi_password, has_aircrack_handshake
+from wifi.playbook import recommend_assessment
 
 
 def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, attack_progress=None):
@@ -47,6 +47,10 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
             pass
 
         cipher = str(network.get("cipher", "Unknown"))
+        playbook = recommend_assessment(
+            {"ssid": ssid, "cipher": cipher, "clients": clients, "wps": network.get("wps", False)}
+        )
+        allow_deauth = not playbook.skip_deauth
 
         def _report_attack(elapsed: float = 0, detail: str = "") -> None:
             if attack_progress is None:
@@ -117,7 +121,7 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
             f.write(f"  Clients: {len(clients)}\n")
             f.write(f"  Client MACs: {', '.join(clients) if clients else 'None'}\n")
 
-        if clients:
+        if clients and allow_deauth:
             with ThreadPoolExecutor(max_workers=min(10, len(clients))) as deauth_executor:
                 deauth_tasks = []
                 for client in clients:
@@ -141,6 +145,9 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                     except Exception as exc:
                         app.logger.error(f"Deauth error for {ssid}: {str(exc)}")
             _report_attack(0, "Deauth done; capture phase (typically 3-5 min)")
+        elif playbook.skip_deauth:
+            _report_attack(0, "Passive capture (deauth skipped by playbook)")
+            app.logger.info(f"Skipping deauth for {ssid}: {playbook.reason}")
         else:
             _report_attack(0, "No client MACs; capture phase (typically 3-5 min)")
 
@@ -196,7 +203,7 @@ def run_auto_hack_single_network(app, bssid, network, session_dir, wordlist, att
                         app.logger.warning(f"Potential PMKID found but failed verification for {ssid}")
                         result["pmkid_status"] = "[yellow]Needs verification"
 
-            if not handshake_found and not pmkid_found and elapsed_time % 30 < 1 and clients:
+            if not handshake_found and not pmkid_found and elapsed_time % 30 < 1 and clients and allow_deauth:
                 app.logger.info(f"Sending additional deauth packets for {ssid}")
                 for client in clients:
                     subprocess.run(

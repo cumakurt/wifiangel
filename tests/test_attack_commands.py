@@ -9,6 +9,7 @@ from attacks.commands import (
     airodump_network_discovery,
     hashcat_crack,
     hashcat_mode_for_hash_file,
+    hashcat_restore,
     hcxdumptool_capture,
     hcxpcapngtool_convert,
     hcxpcapngtool_info,
@@ -76,6 +77,18 @@ class AttackCommandTests(unittest.TestCase):
         self.assertEqual(
             hashcat_crack("hash.22000", "words.txt", workload=0, status=True, potfile_disable=True),
             ["hashcat", "-m", "22000", "-a", "0", "hash.22000", "words.txt", "--status", "--potfile-disable"],
+        )
+        self.assertEqual(
+            hashcat_crack("hash.22000", "words.txt", rules="best64.rule"),
+            ["hashcat", "-m", "22000", "-a", "0", "-w", "3", "hash.22000", "words.txt", "-r", "best64.rule"],
+        )
+        self.assertEqual(
+            hashcat_crack("hash.22000", attack_mode=3, mask="?d?d?d?d?d?d?d?d"),
+            ["hashcat", "-m", "22000", "-a", "3", "-w", "3", "hash.22000", "?d?d?d?d?d?d?d?d"],
+        )
+        self.assertEqual(
+            hashcat_restore("wifiangel_lab_22000"),
+            ["hashcat", "--session", "wifiangel_lab_22000", "--restore"],
         )
 
     def test_hashcat_mode_for_hash_file(self):

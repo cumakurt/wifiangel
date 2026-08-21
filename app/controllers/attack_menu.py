@@ -6,14 +6,18 @@ from rich.prompt import Prompt
 
 from app.services.runtime_helpers import selected_network_record
 from app.ui import render_menu_panel, target_banner
+from app.services.tools.technical_service import run_hashcat_job_manager
+from wifi.playbook import recommend_assessment
 
 
 def run_attack_menu(app) -> None:
     while True:
         record = selected_network_record(app)
+        playbook = None
         if record:
             bssid, network = record
-            target_banner(app.console, str(network["ssid"]), bssid)
+            playbook = recommend_assessment(network)
+            target_banner(app.console, str(network["ssid"]), bssid, playbook)
         elif app.selected_network:
             app.selected_network = None
 
@@ -29,6 +33,7 @@ def run_attack_menu(app) -> None:
                 ("6", "WPS attack"),
                 ("7", "Evil twin lab"),
                 ("8", "Man-in-the-middle toolkit"),
+                ("9", "Hashcat job manager"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -43,6 +48,7 @@ def run_attack_menu(app) -> None:
             "6": app.wps_attack,
             "7": app.evil_twin_attack,
             "8": app.mitm_attack,
+            "9": lambda: run_hashcat_job_manager(app),
         }
         if choice == "0":
             app.current_menu = "main"

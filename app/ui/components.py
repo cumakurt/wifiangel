@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+from wifi.playbook import AssessmentPlaybook
 
 from .theme import BORDER_STYLE
 
@@ -91,12 +94,41 @@ def create_scan_results_table() -> Table:
     return table
 
 
-def target_banner(console: Console, ssid: str, bssid: str) -> None:
+def target_banner(
+    console: Console,
+    ssid: str,
+    bssid: str,
+    playbook: Optional[AssessmentPlaybook] = None,
+) -> None:
+    body = f"[meta]Target[/]  [highlight]{ssid}[/]  [meta]({bssid})[/]"
+    if playbook is not None:
+        body += (
+            f"\n[meta]AKM[/]  [accent]{playbook.akm_label}[/]"
+            f"  [meta]Capture[/]  {playbook.capture_mode}"
+            f"\n[meta]Next[/]  {playbook.menu_label}"
+        )
     console.print(
         Panel(
-            f"[meta]Target[/]  [highlight]{ssid}[/]  [meta]({bssid})[/]",
+            body,
             border_style=BORDER_STYLE,
             box=box.MINIMAL,
             padding=(0, 1),
         )
+    )
+
+
+def render_playbook_panel(console: Console, playbook: AssessmentPlaybook) -> None:
+    table = Table(show_header=False, box=box.MINIMAL, border_style=BORDER_STYLE)
+    table.add_column("Field", style="meta", no_wrap=True)
+    table.add_column("Value", style="white")
+    table.add_row("AKM", playbook.akm_label)
+    table.add_row("Capture", playbook.capture_mode)
+    table.add_row("Next module", playbook.menu_label)
+    table.add_row("Reason", playbook.reason)
+    if playbook.skip_deauth:
+        table.add_row("Deauth", "skipped (PMF/SAE/enterprise/open, or no associated stations)")
+    if playbook.findings:
+        table.add_row("Notes", " | ".join(playbook.findings))
+    console.print(
+        Panel(table, title="[bold]Assessment playbook[/]", border_style=BORDER_STYLE, box=box.MINIMAL)
     )

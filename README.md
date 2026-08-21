@@ -32,7 +32,7 @@ WiFiAngel is an interactive **terminal (TUI)** application for **authorized** wi
 | **Monitor mode** | Puts the chosen adapter into monitor mode via `airmon-ng` / `iw`, with interface resolution (e.g. `wlan0` → `wlan0mon`) through `WiFiAdapterManager`. |
 | **Network discovery** | Passive scan using **`airodump-ng`** CSV export (`--band abg`), parsed and merged into an in-memory AP list with SSID, BSSID, channel, security, signal, clients, and WPS hints where available. |
 | **Live scan UI** | While scanning from the main menu, a live Rich **table** updates; you can return to the main menu and stop the scan with the same menu option. |
-| **Target selection** | Choose a BSSID from discovered networks for attacks that require a selected AP. |
+| **Target selection** | Choose a BSSID from discovered networks. The TUI shows an **assessment playbook**: AKM (PSK/SAE/802.1X/Open), capture mode (active vs passive), and the next existing module. PMF/SAE-only targets skip deauth. |
 
 ### Attack techniques menu
 
@@ -46,14 +46,15 @@ All attack flows assume a **selected target** where applicable. The app asks for
 | **4** | **Dictionary attack** | Run **`aircrack-ng`** (or related flow) against a captured handshake using a wordlist (defaults under `config/defaults.py`). |
 | **5** | **Hybrid (handshake + PMKID)** | Combined capture path: handshake and PMKID in one workflow, then crack attempts as data becomes available. |
 | **6** | **WPS attack** | **`reaver`**: Pixie Dust (`-K 1`) or PIN brute force, with live output in the TUI (requires WPS-enabled target). |
-| **7** | **Evil Twin lab** | **`hostapd`** + **`dnsmasq`** fake AP: DHCP, DNS, optional **client isolation** awareness, uplink checks. With a **non‑Wi‑Fi default route** (e.g. Ethernet), the tool can enable **IP forwarding**, **iptables NAT**, DHCP renew on uplink, and show activity (e.g. **dnsmasq** queries, **conntrack** / **ss**-style stats) for lab observation. |
+| **7** | **Evil Twin lab** | **`hostapd`** + **`dnsmasq`** fake AP. Optional **lab captive portal** (HTTP + DNS sink) and **client isolation** with a two-lease AP reachability check. SSID defaults to the selected target, otherwise the most-probed client PNL name from the last scan. |
 | **8** | **Man-in-the-Middle toolkit** | Requires **`bettercap`**: interface + gateway selection, optional **ping sweep** for targets, ARP spoof + sniff caplet, Rich **Live** dashboard (session, traffic digest, ARP clients, pattern alerts). Session logs under `logs/mitm/<timestamp>/`. |
+| **9** | **Hashcat job manager** | Queue dictionary, **rules** (`-r`), or **mask** (`-a 3`) jobs against `.22000` hashes; list status and show `--restore` argv. Same store as Tools → Technical intelligence. |
 
 ### Tools menu
 
 | # | Feature | Summary |
 |---|---------|---------|
-| **1** | **Wi-Fi adapter settings** | Toggle **monitor / managed** mode, **set channel**, show adapter info (`iwconfig` / related). |
+| **1** | **Wi-Fi adapter settings** | Toggle **monitor / managed** mode, **set channel**, show adapter info, **select capture NIC** and optional second **AP NIC** for Evil Twin without restarting the TUI. |
 | **2** | **Network statistics** | Table of discovered networks: channels, security, signal, clients, data packet counts, first/last seen (requires prior scan data). |
 | **3** | **Client analysis** | Lists client MACs observed per network with security context. |
 | **4** | **MAC address changer** | Wrapper around **`macchanger`**: show, random, custom, restore. |
@@ -69,6 +70,10 @@ All attack flows assume a **selected target** where applicable. The app asks for
 | **14** | **Capture Health Checker** | Validates `.cap` / `.pcapng` / `.22000` capture integrity, duplicate records, and corrupt entries with a health verdict. |
 | **15** | **WPS Risk Analyzer** | Estimates WPS lock-state exposure, rate-limit hints, and practical success window for WPS-enabled targets. |
 | **16** | **Channel Hopper Optimizer** | Adaptive per-channel dwell and hop-interval optimization based on live network/client pressure. |
+| **17** | **Technical intelligence** | PMF/WPA3 tables, artifact index, hashcat job manager, adapter capabilities. |
+| **18** | **Network hopper** | Dwell on each discovered AP channel in turn. |
+| **19** | **Generate HTML session report** | Write the current session log tree to HTML, including the assessment playbook. |
+| **20** | **Probe SSIDs (client PNL)** | Rank SSIDs from airodump-ng **Probed ESSIDs**, including unassociated stations. The top usable name is the Evil Twin default when no broadcast target SSID is selected. |
 
 ### Automated assessment workflow
 

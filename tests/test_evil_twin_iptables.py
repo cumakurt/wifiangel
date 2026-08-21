@@ -2,8 +2,10 @@ import unittest
 
 from cleanup.iptables import (
     FILTER_CHAIN,
+    INPUT_CHAIN,
     LAN_CIDR,
     NAT_CHAIN,
+    PRE_CHAIN,
     apply_evil_twin_nat,
     evil_twin_nat_setup_commands,
     evil_twin_nat_teardown_commands,
@@ -57,7 +59,35 @@ class EvilTwinIptablesTests(unittest.TestCase):
         self.assertTrue(any(cmd == ["iptables", "-X", FILTER_CHAIN] for cmd in commands))
         self.assertTrue(any(cmd == ["iptables", "-t", "nat", "-F", NAT_CHAIN] for cmd in commands))
         self.assertTrue(any(cmd == ["iptables", "-t", "nat", "-X", NAT_CHAIN] for cmd in commands))
+        self.assertTrue(any(cmd == ["iptables", "-F", INPUT_CHAIN] for cmd in commands))
+        self.assertTrue(any(cmd == ["iptables", "-t", "nat", "-F", PRE_CHAIN] for cmd in commands))
         self.assertFalse(any("iptables-restore" in cmd for cmd in commands))
+
+    def test_portal_without_wan_uses_prerouting_dnat(self):
+        commands = evil_twin_nat_setup_commands(ap_iface="wlan0", wan_iface=None, portal=True)
+        joined = [" ".join(cmd) for cmd in commands]
+        self.assertFalse(any(_is_global_table_flush(cmd) for cmd in commands))
+        self.assertFalse(any(cmd[-1] == "MASQUERADE" for cmd in commands))
+        self.assertIn(f"iptables -t nat -N {PRE_CHAIN}", joined)
+        self.assertTrue(any("PREROUTING" in cmd and PRE_CHAIN in cmd for cmd in commands))
+        self.assertTrue(any("DNAT" in cmd and "192.168.1.1:80" in cmd for cmd in commands))
+        self.assertTrue(any(INPUT_CHAIN in cmd and "--dport" in cmd and "80" in cmd for cmd in commands))
+
+    def test_isolate_without_wan_drops_ap_to_ap(self):
+        commands = evil_twin_nat_setup_commands(
+            ap_iface="wlan0", wan_iface=None, isolate_clients=True
+        )
+        self.assertFalse(any(_is_global_table_flush(cmd) for cmd in commands))
+        self.assertTrue(
+            any(cmd == ["iptables", "-A", FILTER_CHAIN, "-i", "wlan0", "-o", "wlan0", "-j", "DROP"] for cmd in commands)
+        )
+        self.assertFalse(any(cmd[-1] == "MASQUERADE" for cmd in commands))
+
+    def test_portal_rejects_unsafe_portal_ip(self):
+        with self.assertRaises(ValueError):
+            evil_twin_nat_setup_commands(
+                ap_iface="wlan0", wan_iface=None, portal=True, portal_ip="1.2.3.4; iptables -F"
+            )
 
     def test_apply_with_wan_tears_down_then_installs(self):
         recorded: list[list[str]] = []

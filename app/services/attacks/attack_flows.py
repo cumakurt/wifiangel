@@ -24,6 +24,7 @@ from app.services.runtime_helpers import (
     network_is_wpa3,
     require_selected_network,
     selected_network_record,
+    skip_psk_for_target,
 )
 from attacks.commands import (
     aircrack_check,
@@ -41,6 +42,7 @@ from attacks.parsers import (
     is_valid_wifi_password,
     parse_aircrack_network_info,
 )
+from wifi.playbook import recommend_assessment
 from config import DEFAULT_WORDLIST, HANDSHAKE_DIR, ROCKYOU_WORDLIST
 
 
@@ -50,6 +52,8 @@ def run_pmkid_attack(app) -> None:
     if not record:
         return
     bssid, network = record
+    if skip_psk_for_target(app, network, action="PMKID capture"):
+        return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     handshake_dir = HANDSHAKE_DIR
@@ -220,6 +224,9 @@ def run_hybrid_attack(app) -> None:
     if not record:
         return
     bssid, network = record
+    if skip_psk_for_target(app, network, action="hybrid handshake/PMKID capture"):
+        return
+    playbook = recommend_assessment(network)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_ssid = sanitize_filename(network.get("ssid"), fallback="network")
@@ -365,7 +372,7 @@ def run_hybrid_attack(app) -> None:
                     break
                 check_for_new_clients()
                 now = time.time()
-                if now - last_deauth >= deauth_interval:
+                if now - last_deauth >= deauth_interval and not playbook.skip_deauth:
                     last_deauth = now
                     deauth_all_clients()
                 if now - last_convert >= convert_interval:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from rich.prompt import Prompt
 
+from app.services.system.adapter_roles import resolve_ap_interface
 from app.ui import render_menu_panel
 
 
@@ -32,6 +33,7 @@ def run_tools_menu(app) -> None:
                 ("17", "Technical intelligence"),
                 ("18", "Network hopper"),
                 ("19", "Generate HTML session report"),
+                ("20", "Probe SSIDs (client PNL)"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -57,6 +59,7 @@ def run_tools_menu(app) -> None:
             "17": app.technical_intelligence,
             "18": app.network_hopper,
             "19": app.generate_session_report,
+            "20": app.probe_ssid_table,
         }
         if choice == "0":
             return
@@ -67,14 +70,21 @@ def run_tools_menu(app) -> None:
 
 def run_wifi_adapter_settings(app) -> None:
     while True:
+        ap_role = resolve_ap_interface(app)
+        ap_note = "same as capture" if ap_role == app.interface_name else ap_role
         render_menu_panel(
             app.console,
             heading="Wi-Fi adapter",
-            intro_lines=[f"[meta]Current interface[/]  [cyan]{app.interface_name}[/]"],
+            intro_lines=[
+                f"[meta]Capture[/]  [cyan]{app.interface_name}[/]",
+                f"[meta]Evil Twin AP[/]  [cyan]{ap_note}[/]",
+            ],
             items=[
                 ("1", "Switch monitor / managed mode"),
                 ("2", "Set channel"),
                 ("3", "Adapter information"),
+                ("4", "Select capture interface"),
+                ("5", "Select AP interface"),
                 ("0", "Back"),
             ],
         )
@@ -84,6 +94,8 @@ def run_wifi_adapter_settings(app) -> None:
             "1": app.change_adapter_mode,
             "2": app.change_channel,
             "3": app.show_adapter_info,
+            "4": app.select_capture_interface,
+            "5": app.select_ap_interface,
         }
         if choice == "0":
             break

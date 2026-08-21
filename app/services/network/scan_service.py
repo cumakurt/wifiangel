@@ -17,7 +17,14 @@ from attacks.commands import airodump_network_discovery
 from app.services.runtime_helpers import ensure_networks_lock, snapshot_networks
 from app.ui import create_scan_results_table
 from config import TMP_DIR
-from wifi.airodump_csv import ap_row_to_network_fields, parse_airodump_csv, station_client_counts, station_client_signals
+from wifi.airodump_csv import (
+    ap_row_to_network_fields,
+    parse_airodump_csv,
+    probed_essids_by_bssid,
+    station_client_counts,
+    station_client_signals,
+)
+from wifi.probes import summarize_probe_ssids
 from wifi.packets import get_security_info as packet_get_security_info
 from wifi.packets import parse_client_observation, parse_network_observation
 
@@ -48,8 +55,11 @@ def run_airodump_scan_loop(app) -> None:
                 aps, stas = parse_airodump_csv(csv_path)
                 by_bssid = station_client_counts(stas)
                 station_signals = station_client_signals(stas)
+                probed_map = probed_essids_by_bssid(stas)
+                probe_stats = summarize_probe_ssids(stas)
                 now = datetime.now()
                 with ensure_networks_lock(app):
+                    app.probe_ssids = probe_stats
                     for ap in aps:
                         fields = ap_row_to_network_fields(ap)
                         if not fields:
@@ -64,6 +74,7 @@ def run_airodump_scan_loop(app) -> None:
                         data_packets = int(fields.get("data_packets") or 0)
                         st_clients = by_bssid.get(bssid, set())
                         client_signals = dict(station_signals.get(bssid, {}))
+                        probes = set(probed_map.get(bssid, set()))
                         if bssid not in app.networks:
                             app.networks[bssid] = {
                                 "ssid": ssid_val,
@@ -71,6 +82,7 @@ def run_airodump_scan_loop(app) -> None:
                                 "cipher": cipher_str,
                                 "clients": set(st_clients),
                                 "client_signals": client_signals,
+                                "probes": probes,
                                 "channel": ch if ch > 0 else 0,
                                 "first_seen": now,
                                 "last_seen": now,
@@ -84,6 +96,8 @@ def run_airodump_scan_loop(app) -> None:
                             merged_clients.update(st_clients)
                             merged_signals = dict(prev.get("client_signals") or {})
                             merged_signals.update(client_signals)
+                            merged_probes = set(prev.get("probes") or set())
+                            merged_probes.update(probes)
                             upd = {
                                 "last_seen": now,
                                 "signal": sig,
@@ -93,6 +107,7 @@ def run_airodump_scan_loop(app) -> None:
                                 "wps": wps or prev.get("wps", False),
                                 "clients": merged_clients,
                                 "client_signals": merged_signals,
+                                "probes": merged_probes,
                             }
                             if ch > 0:
                                 upd["channel"] = ch

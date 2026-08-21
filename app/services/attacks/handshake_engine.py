@@ -20,13 +20,14 @@ from rich.table import Table
 from adapters.system_tools import terminate_process
 from app.safety import sanitize_filename
 from app.services.runtime_helpers import ensure_networks_lock, require_selected_network
-from app.ui import BORDER_STYLE
+from app.ui import BORDER_STYLE, render_playbook_panel
 from attacks.commands import aireplay_deauth, airodump_capture, hcxdumptool_capture, hcxpcapngtool_convert
 from attacks.hashcat_jobs import HashcatJobStore
 from config import DEFAULT_WORDLIST, HANDSHAKE_CAPTURE_TIMEOUT_SECONDS, HANDSHAKE_DIR, TMP_DIR
 from wifi.capture_quality import CaptureQualityReport, analyze_capture_quality
 from wifi.client_profiler import build_client_profiles
 from wifi.frame_intelligence import summarize_network_security
+from wifi.playbook import recommend_assessment
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,19 @@ def run_handshake_capture_engine(app) -> None:
     if not record:
         return
     bssid, network = record
+    playbook = recommend_assessment(network)
+    render_playbook_panel(app.console, playbook)
+    if playbook.skip_psk_capture:
+        app.console.print(
+            "[warning]Playbook skipped PSK handshake capture for this target. "
+            f"Use {playbook.menu_label} instead.[/]"
+        )
+        app.logger.info(
+            "Handshake capture skipped: module=%s akm=%s",
+            playbook.module_id,
+            playbook.akm_label,
+        )
+        return
     target = build_capture_target(bssid, network)
     policy = CapturePolicy()
     session = create_capture_session(app.interface_name, target)
@@ -290,13 +304,17 @@ def choose_deauth_strategy(
     policy: CapturePolicy,
 ) -> DeauthStrategy:
     clients = prioritize_clients(target, networks)[: policy.max_clients_per_burst]
-    if security_profile.get("pmf_required"):
+    if (
+        security_profile.get("pmf_required")
+        or security_profile.get("passive_capture")
+        or security_profile.get("enterprise")
+    ):
         return DeauthStrategy(
             mode="passive",
             clients=(),
             packet_count=0,
             interval_seconds=max(policy.deauth_interval_seconds, 15.0),
-            reason="PMF required; active deauthentication disabled",
+            reason="PMF/SAE/802.1X; active deauthentication disabled",
         )
     if clients:
         mode = "targeted-transition" if security_profile.get("transition_mode") else "targeted"
@@ -499,6 +517,7 @@ def _render_capture_status(session: CaptureSession, report: Optional[CaptureQual
     details.add_column("Value", style="white")
     details.add_row("Elapsed", f"{session.duration_seconds:.1f}s")
     details.add_row("Status", session.status)
+    details.add_row("Deauth", strategy.reason)
     details.add_row("Session", session.session_id)
     details.add_row("Manifest", str(session.manifest_path))
     return Panel(Group(table, details), title="[bold]Advanced Handshake Capture[/]", border_style=BORDER_STYLE, box=box.ROUNDED)

@@ -46,6 +46,19 @@ class HandshakeEngineTests(unittest.TestCase):
         self.assertEqual(strategy.mode, "passive")
         self.assertEqual(strategy.clients, ())
 
+    def test_choose_deauth_strategy_passive_for_sae_only(self):
+        target = build_capture_target(
+            "aa:bb:cc:dd:ee:ff",
+            {"ssid": "Lab", "channel": 6, "cipher": "WPA3/SAE", "clients": {"11:22:33:44:55:66"}},
+        )
+        strategy = choose_deauth_strategy(
+            target,
+            {"pmf_required": False, "passive_capture": True, "transition_mode": False},
+            {"aa:bb:cc:dd:ee:ff": {"ssid": "Lab", "signal": -40, "clients": set(target.clients)}},
+            CapturePolicy(),
+        )
+        self.assertEqual(strategy.mode, "passive")
+
     def test_choose_deauth_strategy_prioritizes_observed_clients(self):
         target = build_capture_target(
             "aa:bb:cc:dd:ee:ff",

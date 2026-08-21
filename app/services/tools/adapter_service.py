@@ -68,6 +68,62 @@ def run_show_adapter_info(app) -> None:
         app.console.print(f"[bold red]Error: {str(exc)}[/]")
 
 
+def run_select_capture_interface(app) -> None:
+    """Pick the monitor/capture NIC without restarting the TUI."""
+    names = app.wifi_adapter.list_wireless_interfaces()
+    if not names:
+        app.console.print("[error]No wireless interfaces found.[/]")
+        return
+    for idx, name in enumerate(names, 1):
+        marker = " (current capture)" if name == app.interface_name else ""
+        app.console.print(f"  {idx}. {name}{marker}")
+    choice = Prompt.ask("Capture interface #", default="1")
+    try:
+        index = int(choice)
+    except ValueError:
+        app.console.print("[error]Invalid selection.[/]")
+        return
+    if not 1 <= index <= len(names):
+        app.console.print("[error]Invalid selection.[/]")
+        return
+    selected = names[index - 1]
+    if selected == app.ap_interface:
+        app.console.print("[warning]Capture and AP cannot be the same dedicated radio. Clearing AP role.[/]")
+        app.ap_interface = None
+    app.interface_name = selected
+    app.console.print(f"[success]Capture interface[/]  [cyan]{app.interface_name}[/]")
+    app.logger.info("Capture interface set to %s", app.interface_name)
+
+
+def run_select_ap_interface(app) -> None:
+    """Pick a second wireless NIC for hostapd, or use the capture radio."""
+    names = [name for name in app.wifi_adapter.list_wireless_interfaces() if name != app.interface_name]
+    app.console.print("  0. Same as capture (single radio)")
+    if not names:
+        app.console.print("[info]Only one wireless NIC is present; Evil Twin will share the capture radio.[/]")
+        app.ap_interface = None
+        return
+    for idx, name in enumerate(names, 1):
+        marker = " (current AP)" if name == getattr(app, "ap_interface", None) else ""
+        app.console.print(f"  {idx}. {name}{marker}")
+    choice = Prompt.ask("AP interface #", default="0")
+    try:
+        index = int(choice)
+    except ValueError:
+        app.console.print("[error]Invalid selection.[/]")
+        return
+    if index == 0:
+        app.ap_interface = None
+        app.console.print("[success]AP role[/]  same as capture")
+        return
+    if not 1 <= index <= len(names):
+        app.console.print("[error]Invalid selection.[/]")
+        return
+    app.ap_interface = names[index - 1]
+    app.console.print(f"[success]AP interface[/]  [cyan]{app.ap_interface}[/]")
+    app.logger.info("AP interface set to %s", app.ap_interface)
+
+
 def run_mac_changer(app) -> None:
     if app.command_runner.which("macchanger") is None:
         app.console.print("[bold red]macchanger is not installed![/]")

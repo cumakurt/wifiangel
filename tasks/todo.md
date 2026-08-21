@@ -1,28 +1,49 @@
-# WiFiAngel quality / logic / performance pass
+# Feature roadmap (priority order)
 
-## Findings to fix
+Authorized lab TUI only. No new exploit engines; extend existing scan → target → capture/crack → report flow.
 
-- [x] Initialize `_networks_lock` at startup; snapshot scan UI under the lock
-- [x] Detect monitor mode via `iw` type, not `endswith("mon")`
-- [x] Guard stale `selected_network` (KeyError)
-- [x] Dictionary attack: hashcat mode 22000 for `.22000`; implement advertised WPA3 option; stop global `pkill`
-- [x] Handshake parser: accept 2+ handshakes, not only `"1 handshake"`
-- [x] PMKID/hybrid: convert/deauth on an interval; handle capture process exit
-- [x] WPS: argv list, merge stderr, set channel first
-- [x] Required tools: match README (hostapd/reaver/macchanger optional)
-- [x] Cleanup: drop `pkill -f air` / `hcx` / `defunct`
-- [x] Channel set: prefer `iw`, report failure; 5 GHz in channel optimizer
-- [x] Signal analyzer: read live scan data
-- [x] Hidden SSID restore: use adapter manager
-- [x] Tests for the above
-- [x] Review section after verification
+## P1 — Assessment playbook (done)
+
+- [x] Playbook, PMF/SAE passive, HTML section, Attacks 9 hashcat (prior slice)
+
+## P2 — Hashcat queue on Attacks menu (done)
+
+- [x] Rules / mask / restore argv (prior slice)
+
+## P3 — Probe SSIDs + Evil Twin default (done)
+
+- [x] Rank SSIDs from airodump-ng Probed ESSIDs, including unassociated stations
+- [x] Tools 20 table; scan stores `app.probe_ssids`
+- [x] Evil Twin SSID: selected broadcast name, else most-probed usable SSID
+
+## P4 — Dual NIC + runtime adapter (done)
+
+- [x] Roles: capture vs AP (`adapter_roles`)
+- [x] Adapter settings 4/5: switch capture/AP PHY without restarting the TUI
+- [x] Evil Twin: dedicated AP radio stays managed; capture radio not forced to managed
+
+## P5 — Evil Twin captive portal + isolation test (done this slice)
+
+- [x] Optional HTTP captive portal on existing dnsmasq DNS sink
+- [x] Client-isolation toggle and two-lease reachability check
+- [x] Keep WIFIANGEL_ET_* iptables chains (no global flush)
+
+## P6 — Enterprise path
+
+- [x] Detect 802.1X/MGT/EAP in playbook (P1)
+- [ ] Later: optional EAP lab AP on hostapd (separate from PSK ET)
+
+## P7 — Session browser
+
+- [ ] Browse `handshake/`, `auto_hack_sessions/`, `logs/mitm/`, hashcat jobs
+- [ ] Re-validate artifact, queue hashcat, attach to HTML report
+
+## Out of scope
+
+Beacon flood / mdk4, SAE CVE-specific tools, Bluetooth attacks, GPS maps.
 
 ## Review
 
-- `python -m compileall` on the tree: clean
-- `python -m pytest -q`: **124 passed** (was 98)
-- Follow-up from architecture and wifi/tests audits: ToDS/FromDS, WPS ESSID false positive, hashcat JSON round-trip, monitor NM rollback, sequential auto-hack, pcap caps, tools 17–19.
-- Evil Twin NAT uses dedicated `WIFIANGEL_ET_FWD` / `WIFIANGEL_ET_NAT` chains; jumps match only `192.168.1.0/24`. Teardown deletes those jumps and chains. Host filter/nat tables are not flushed.
-- MITM still uses `iptables-restore` with a global `iptables -F` fallback (separate from Evil Twin).
-- Scope: quality, logic, functionality, and performance of existing modules. No new attack capabilities.
-- Remaining hardware-dependent flows (aireplay, hostapd, bettercap, reaver) need a root Linux adapter to exercise live; command builders and parsers are covered by unit tests.
+- `python -m pytest -q`: **155 passed**
+- Landed: P5 lab captive portal (HTTP + DNS sink, no password form) and STA isolation + two-lease AP ping check; scoped `WIFIANGEL_ET_PRE` / `WIFIANGEL_ET_IN` chains.
+- Next slice: P6 optional EAP lab AP, or P7 session browser.

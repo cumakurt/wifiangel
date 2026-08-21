@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import MISSING, asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from app.safety import sanitize_filename
-from attacks.commands import hashcat_crack
+from attacks.commands import hashcat_crack, hashcat_restore
 
 
 @dataclass(frozen=True)
@@ -27,20 +27,26 @@ class HashcatJob:
     hash_sha256: str
     created_at: str
     updated_at: str
+    attack_mode: int = 0
+    rules: str = ""
+    mask: str = ""
 
     def command(self) -> list[str]:
         command = hashcat_crack(
             self.hash_file,
-            self.wordlist,
+            self.wordlist or None,
             mode=self.mode,
             workload=self.workload,
             status=True,
             potfile_disable=self.potfile_disable,
+            attack_mode=self.attack_mode,
+            rules=self.rules or None,
+            mask=self.mask or None,
         )
         return insert_hashcat_session(command, self.session)
 
     def restore_command(self) -> list[str]:
-        return ["hashcat", "--session", self.session, "--restore"]
+        return hashcat_restore(self.session)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -72,9 +78,19 @@ class HashcatJobStore:
         workload: int = 3,
         potfile_disable: bool = False,
         session: str | None = None,
+        attack_mode: int = 0,
+        rules: str = "",
+        mask: str = "",
     ) -> HashcatJob:
         digest = file_sha256(hash_file)
-        duplicate = self.find_duplicate(digest, str(wordlist), mode)
+        duplicate = self.find_duplicate(
+            digest,
+            str(wordlist),
+            mode,
+            attack_mode=int(attack_mode),
+            rules=str(rules or ""),
+            mask=str(mask or ""),
+        )
         if duplicate:
             return duplicate
 
@@ -91,6 +107,9 @@ class HashcatJobStore:
             hash_sha256=digest,
             created_at=now,
             updated_at=now,
+            attack_mode=int(attack_mode),
+            rules=str(rules or ""),
+            mask=str(mask or ""),
         )
         jobs = self.list_jobs()
         jobs.append(job)
@@ -112,12 +131,28 @@ class HashcatJobStore:
             self.save_jobs(out)
         return updated
 
-    def find_duplicate(self, hash_sha256: str, wordlist: str, mode: int) -> HashcatJob | None:
+    def find_duplicate(
+        self,
+        hash_sha256: str,
+        wordlist: str,
+        mode: int,
+        *,
+        attack_mode: int = 0,
+        rules: str = "",
+        mask: str = "",
+    ) -> HashcatJob | None:
         terminal = {"complete", "completed", "failed", "cancelled"}
         for job in self.list_jobs():
             if job.status.lower() in terminal:
                 continue
-            if job.hash_sha256 == hash_sha256 and job.wordlist == wordlist and job.mode == int(mode):
+            if (
+                job.hash_sha256 == hash_sha256
+                and job.wordlist == wordlist
+                and job.mode == int(mode)
+                and job.attack_mode == int(attack_mode)
+                and job.rules == str(rules or "")
+                and job.mask == str(mask or "")
+            ):
                 return job
         return None
 
@@ -131,7 +166,14 @@ class HashcatJobStore:
 
 def job_from_mapping(item: dict[str, Any]) -> HashcatJob:
     """Build a job from persisted JSON, ignoring computed keys like command/restore_command."""
-    payload = {key: item[key] for key in HashcatJob.__dataclass_fields__ if key in item}
+    payload: dict[str, Any] = {}
+    for field in fields(HashcatJob):
+        if field.name in item:
+            payload[field.name] = item[field.name]
+        elif field.default is not MISSING:
+            payload[field.name] = field.default
+        elif field.default_factory is not MISSING:  # type: ignore[misc]
+            payload[field.name] = field.default_factory()
     return HashcatJob(**payload)
 
 

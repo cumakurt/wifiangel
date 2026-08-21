@@ -160,10 +160,11 @@ def run_hashcat_job_manager(app) -> None:
             app.console,
             heading="Hashcat job manager",
             items=[
-                ("1", "Create queued job"),
-                ("2", "List jobs"),
-                ("3", "Show command"),
-                ("4", "Update job status"),
+                ("1", "Create dictionary / rules job"),
+                ("2", "Create mask job (-a 3)"),
+                ("3", "List jobs"),
+                ("4", "Show command and restore argv"),
+                ("5", "Update job status"),
                 ("0", "Back"),
             ],
         )
@@ -171,33 +172,18 @@ def run_hashcat_job_manager(app) -> None:
         if choice == "0":
             return
         if choice == "1":
-            hash_file = _prompt_existing_file("Hash file", default=str(HANDSHAKE_DIR))
-            if not hash_file:
-                continue
-            wordlist = _prompt_existing_file("Wordlist file", default="wordlists")
-            if not wordlist:
-                continue
-            mode = IntPrompt.ask("Hashcat mode", default=22000)
-            workload = IntPrompt.ask("Workload profile", default=3)
-            potfile_disable = Confirm.ask("Disable potfile for this job?", default=False)
-            job = store.create_job(
-                hash_file=hash_file,
-                wordlist=wordlist,
-                mode=mode,
-                workload=workload,
-                potfile_disable=potfile_disable,
-            )
-            app.console.print(f"[success]Job ready:[/] {job.job_id}")
-            app.console.print(_format_command(job.command()))
+            _create_hashcat_job(app, store, attack_mode=0)
         elif choice == "2":
-            _print_hashcat_jobs(app, store)
+            _create_hashcat_job(app, store, attack_mode=3)
         elif choice == "3":
+            _print_hashcat_jobs(app, store)
+        elif choice == "4":
             jobs = store.list_jobs()
             job = _select_job(app, jobs)
             if job:
                 app.console.print(Panel(_format_command(job.command()), title=f"Job {job.job_id}", border_style=BORDER_STYLE, box=box.MINIMAL))
                 app.console.print(Panel(_format_command(job.restore_command()), title="Restore", border_style=BORDER_STYLE, box=box.MINIMAL))
-        elif choice == "4":
+        elif choice == "5":
             jobs = store.list_jobs()
             job = _select_job(app, jobs)
             if job:
@@ -487,6 +473,55 @@ def _print_security_profile_table(app) -> None:
     app.console.print(table)
 
 
+def _create_hashcat_job(app, store: HashcatJobStore, *, attack_mode: int) -> None:
+    hash_file = _prompt_existing_file("Hash file", default=str(HANDSHAKE_DIR))
+    if not hash_file:
+        app.console.print("[warning]Hash file not found.[/]")
+        return
+    wordlist = Path("-")
+    rules = ""
+    mask = ""
+    if attack_mode == 3:
+        mask = Prompt.ask("Mask", default="?d?d?d?d?d?d?d?d").strip()
+        if not _valid_hashcat_mask(mask):
+            app.console.print("[warning]Invalid mask. Use hashcat charset tokens only (for example ?d?l?u).[/]")
+            return
+    else:
+        wordlist_path = _prompt_existing_file("Wordlist file", default="wordlists")
+        if not wordlist_path:
+            app.console.print("[warning]Wordlist not found.[/]")
+            return
+        wordlist = wordlist_path
+        rules_value = Prompt.ask("Rules file (optional, empty to skip)", default="").strip()
+        if rules_value:
+            rules_path = Path(rules_value).expanduser()
+            if not rules_path.is_file():
+                app.console.print("[warning]Rules file not found.[/]")
+                return
+            rules = str(rules_path)
+    mode = IntPrompt.ask("Hashcat mode", default=22000)
+    workload = IntPrompt.ask("Workload profile", default=3)
+    potfile_disable = Confirm.ask("Disable potfile for this job?", default=False)
+    job = store.create_job(
+        hash_file=hash_file,
+        wordlist=wordlist,
+        mode=mode,
+        workload=workload,
+        potfile_disable=potfile_disable,
+        attack_mode=attack_mode,
+        rules=rules,
+        mask=mask,
+    )
+    app.console.print(f"[success]Job ready:[/] {job.job_id}")
+    app.console.print(_format_command(job.command()))
+
+
+def _valid_hashcat_mask(mask: str) -> bool:
+    if not mask or len(mask) > 256:
+        return False
+    return bool(__import__("re").fullmatch(r"[A-Za-z0-9?._\-\[\]]+", mask))
+
+
 def _prompt_existing_file(label: str, *, default: str) -> Path | None:
     value = Prompt.ask(label, default=default).strip()
     path = Path(value).expanduser()
@@ -506,12 +541,13 @@ def _print_hashcat_jobs(app, store: HashcatJobStore) -> None:
     table.add_column("ID", style="cyan")
     table.add_column("Status", style="green")
     table.add_column("Mode", style="yellow", justify="right")
+    table.add_column("-a", style="blue", justify="right")
     table.add_column("Session", style="magenta")
     table.add_column("Hash file", style="white")
     for job in jobs:
-        table.add_row(job.job_id, job.status, str(job.mode), job.session, job.hash_file)
+        table.add_row(job.job_id, job.status, str(job.mode), str(job.attack_mode), job.session, job.hash_file)
     if not jobs:
-        table.add_row("-", "none", "-", "-", "-")
+        table.add_row("-", "none", "-", "-", "-", "-")
     app.console.print(table)
 
 

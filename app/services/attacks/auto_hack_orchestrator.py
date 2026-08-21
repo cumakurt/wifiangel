@@ -21,6 +21,7 @@ from rich.text import Text
 from adapters.system_tools import managed_name_from_monitor
 from app.services.runtime_helpers import ensure_networks_lock
 from config import AUTO_HACK_SESSIONS_DIR, DEFAULT_WORDLIST, ROCKYOU_WORDLIST
+from wifi.playbook import recommend_assessment
 
 
 def run_auto_hack(app) -> None:
@@ -67,6 +68,7 @@ def run_auto_hack(app) -> None:
         ensure_networks_lock(app)
         with app._networks_lock:
             app.networks.clear()
+            app.probe_ssids = ()
         app.scanning = True
         scan_thread = threading.Thread(target=app.scan_networks, daemon=True)
         scan_thread.start()
@@ -149,9 +151,18 @@ def run_auto_hack(app) -> None:
         priority_table.add_column("Score", style="yellow", justify="center")
         priority_table.add_column("Clients", style="blue", justify="center")
         priority_table.add_column("Security", style="magenta")
+        priority_table.add_column("Next", style="white")
         display_networks = min(20, len(scored_networks))
         for i, (bssid, network, score) in enumerate(scored_networks[:display_networks], 1):
-            priority_table.add_row(str(i), f"{network['ssid']} ({bssid})", str(score), str(len(network["clients"])), network["cipher"])
+            playbook = recommend_assessment(network)
+            priority_table.add_row(
+                str(i),
+                f"{network['ssid']} ({bssid})",
+                str(score),
+                str(len(network["clients"])),
+                network["cipher"],
+                playbook.akm_label,
+            )
         app.console.print(priority_table)
 
         app.console.print("\n[bold blue]Network Selection[/]")
@@ -207,6 +218,16 @@ def run_auto_hack(app) -> None:
                 if not isinstance(clients, set):
                     clients = set(clients) if clients else set()
                 validated_network["clients"] = clients
+                validated_network["wps"] = bool(network.get("wps", False))
+                playbook = recommend_assessment(validated_network)
+                if playbook.skip_psk_capture:
+                    app.logger.info(
+                        "Skipping %s (%s): playbook %s",
+                        validated_network["ssid"],
+                        bssid,
+                        playbook.module_id,
+                    )
+                    continue
                 if validated_network["clients"]:
                     networks_with_clients.append((bssid, validated_network))
                     app.logger.debug(f"Validated network data for {validated_network['ssid']} ({bssid})")

@@ -28,25 +28,38 @@ def aircrack_crack(capture_file: PathLike, wordlist: PathLike, essid: Optional[s
 
 def hashcat_crack(
     hash_file: PathLike,
-    wordlist: PathLike,
+    wordlist: Optional[PathLike] = None,
     *,
     mode: int = 22000,
     workload: int = 3,
     force: bool = False,
     status: bool = False,
     potfile_disable: bool = False,
+    attack_mode: int = 0,
+    rules: Optional[PathLike] = None,
+    mask: Optional[str] = None,
 ) -> List[str]:
-    command = ["hashcat", "-m", str(mode), "-a", "0"]
+    command = ["hashcat", "-m", str(mode), "-a", str(int(attack_mode))]
     if workload:
         command.extend(["-w", str(workload)])
     if force:
         command.append("--force")
-    command.extend([str(hash_file), str(wordlist)])
+    command.append(str(hash_file))
+    if int(attack_mode) == 3:
+        command.append(str(mask or ""))
+    else:
+        command.append(str(wordlist or ""))
+        if rules:
+            command.extend(["-r", str(rules)])
     if status:
         command.append("--status")
     if potfile_disable:
         command.append("--potfile-disable")
     return command
+
+
+def hashcat_restore(session: str) -> List[str]:
+    return ["hashcat", "--session", str(session), "--restore"]
 
 
 def hashcat_mode_for_hash_file(hash_file: PathLike) -> int:

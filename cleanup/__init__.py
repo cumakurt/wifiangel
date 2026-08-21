@@ -2,8 +2,11 @@
 
 from .iptables import (
     FILTER_CHAIN,
+    INPUT_CHAIN,
     LAN_CIDR,
     NAT_CHAIN,
+    PORTAL_IP,
+    PRE_CHAIN,
     apply_evil_twin_nat,
     evil_twin_nat_setup_commands,
     evil_twin_nat_teardown_commands,
@@ -13,8 +16,11 @@ from .network import resolve_evil_twin_log_dir
 
 __all__ = [
     "FILTER_CHAIN",
+    "INPUT_CHAIN",
     "LAN_CIDR",
     "NAT_CHAIN",
+    "PORTAL_IP",
+    "PRE_CHAIN",
     "apply_evil_twin_nat",
     "evil_twin_nat_setup_commands",
     "evil_twin_nat_teardown_commands",
