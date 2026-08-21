@@ -22,21 +22,21 @@ Authorized lab TUI only. No new exploit engines; extend existing scan → target
 - [x] Adapter settings 4/5: switch capture/AP PHY without restarting the TUI
 - [x] Evil Twin: dedicated AP radio stays managed; capture radio not forced to managed
 
-## P5 — Evil Twin captive portal + isolation test (done this slice)
+## P5 — Evil Twin captive portal + isolation test (done)
 
 - [x] Optional HTTP captive portal on existing dnsmasq DNS sink
 - [x] Client-isolation toggle and two-lease reachability check
 - [x] Keep WIFIANGEL_ET_* iptables chains (no global flush)
 
-## P6 — Enterprise path
+## P6 — Enterprise path (done)
 
 - [x] Detect 802.1X/MGT/EAP in playbook (P1)
-- [ ] Later: optional EAP lab AP on hostapd (separate from PSK ET)
+- [x] Optional EAP lab AP on hostapd (separate Attacks 10 entry; local eap_server, no RADIUS relay)
 
-## P7 — Session browser
+## P7 — Session browser (done this slice)
 
-- [ ] Browse `handshake/`, `auto_hack_sessions/`, `logs/mitm/`, hashcat jobs
-- [ ] Re-validate artifact, queue hashcat, attach to HTML report
+- [x] Browse `handshake/`, `auto_hack_sessions/`, `logs/mitm/`, hashcat jobs
+- [x] Re-validate artifact, queue hashcat, attach to HTML report
 
 ## Out of scope
 
@@ -44,6 +44,6 @@ Beacon flood / mdk4, SAE CVE-specific tools, Bluetooth attacks, GPS maps.
 
 ## Review
 
-- `python -m pytest -q`: **155 passed**
-- Landed: P5 lab captive portal (HTTP + DNS sink, no password form) and STA isolation + two-lease AP ping check; scoped `WIFIANGEL_ET_PRE` / `WIFIANGEL_ET_IN` chains.
-- Next slice: P6 optional EAP lab AP, or P7 session browser.
+- `python -m pytest -q`: **166 passed**
+- Landed: Tools 21 session browser; Tools 19 HTML report includes attached lab sessions.
+- Roadmap P1–P7 complete.

@@ -71,6 +71,7 @@ REQUIRED_SYSTEM_TOOLS = {
 OPTIONAL_SYSTEM_TOOLS = {
     "hostapd": ("hostapd",),
     "dnsmasq": ("dnsmasq",),
+    "openssl": ("openssl",),
     "macchanger": ("macchanger",),
     "reaver": ("reaver",),
     "bettercap": ("bettercap",),

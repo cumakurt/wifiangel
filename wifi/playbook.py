@@ -83,6 +83,9 @@ def recommend_assessment(network: Optional[dict[str, Any]]) -> AssessmentPlayboo
             skip_psk_capture=True,
         )
     if summary.get("enterprise"):
+        findings.append(
+            "Optional lab: Attack 10 local WPA-EAP AP (hostapd eap_server, not a RADIUS relay)"
+        )
         return _playbook(
             MODULE_ENTERPRISE,
             summary,

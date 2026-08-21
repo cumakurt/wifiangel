@@ -20,6 +20,16 @@ from rich.table import Table
 from app.ui.theme import BORDER_STYLE
 from app.services.runtime_helpers import selected_network_record
 from app.services.system.adapter_roles import dedicated_ap_radio, resolve_ap_interface, role_exclude_ifaces
+from app.services.attacks.eap_lab import (
+    DEFAULT_EAP_IDENTITY,
+    DEFAULT_EAP_PASSWORD,
+    DEFAULT_EAP_SSID,
+    build_eap_hostapd_conf,
+    eap_methods_label,
+    valid_eap_identity,
+    valid_eap_password,
+    write_eap_lab_material,
+)
 from app.services.attacks.evil_twin_lab import (
     build_dnsmasq_conf,
     build_hostapd_conf,
@@ -34,13 +44,19 @@ from wifi.probes import preferred_evil_twin_ssid, probe_stats_from_app
 
 def run_evil_twin_attack(app) -> None:
     """Run Evil Twin attack workflow."""
-    run_evil_twin_attack_impl(app)
+    run_evil_twin_attack_impl(app, mode="psk")
 
 
-def run_evil_twin_attack_impl(app) -> None:
+def run_eap_lab_ap(app) -> None:
+    """Stand up a local WPA-EAP lab AP (hostapd eap_server, no RADIUS relay)."""
+    run_evil_twin_attack_impl(app, mode="eap")
+
+
+def run_evil_twin_attack_impl(app, mode: str = "psk") -> None:
     """Create a lab access point for authorized wireless assessment."""
     original_settings = {}
     log_dir: Optional[Path] = None
+    eap_mode = mode == "eap"
 
     try:
         try:
@@ -172,6 +188,14 @@ def run_evil_twin_attack_impl(app) -> None:
                 probe_stats=probe_stats_from_app(app),
             )
 
+        if eap_mode:
+            default_ssid = DEFAULT_EAP_SSID
+            default_source = "eap_lab"
+            app.console.print(
+                "[info]EAP lab AP uses a local hostapd EAP server (PEAP/TTLS). "
+                "It does not proxy or relay to an external RADIUS.[/]"
+            )
+
         if default_source == "probe" and default_ssid:
             app.console.print(
                 f"[info]No broadcast target SSID; defaulting Evil Twin SSID to most-probed name "
@@ -192,7 +216,8 @@ def run_evil_twin_attack_impl(app) -> None:
                 preview.add_row(stat.ssid, str(stat.station_count))
             app.console.print(preview)
 
-        ssid = Prompt.ask("Enter SSID for the Evil Twin", default=default_ssid)
+        ssid_prompt = "Enter SSID for the EAP lab AP" if eap_mode else "Enter SSID for the Evil Twin"
+        ssid = Prompt.ask(ssid_prompt, default=default_ssid)
         if not ssid and default_ssid:
             ssid = default_ssid
             app.console.print(f"[bold cyan]Using default SSID: {ssid}[/]")
@@ -210,13 +235,30 @@ def run_evil_twin_attack_impl(app) -> None:
             app.console.print("[bold yellow]Invalid channel, using default channel 1[/]")
             channel = 1
 
-        use_wpa2 = Prompt.ask("Enable WPA2-PSK security? (y/n)", choices=["y", "n"]) == "y"
+        use_wpa2 = False
         wpa_passphrase = ""
-        if use_wpa2:
-            wpa_passphrase = Prompt.ask("Enter WPA2 passphrase (8-63 characters)")
-            if not _valid_wpa_passphrase(wpa_passphrase):
-                app.console.print("[bold red]Invalid WPA2 passphrase. Use 8-63 characters without line breaks.[/]")
+        eap_identity = DEFAULT_EAP_IDENTITY
+        eap_password = DEFAULT_EAP_PASSWORD
+        if eap_mode:
+            eap_identity = Prompt.ask("Lab EAP identity", default=DEFAULT_EAP_IDENTITY)
+            if not valid_eap_identity(eap_identity):
+                app.console.print("[bold red]Invalid EAP identity. Use 1-64 characters without quotes or line breaks.[/]")
                 return
+            eap_password = Prompt.ask(
+                "Lab EAP password",
+                default=DEFAULT_EAP_PASSWORD,
+                password=True,
+            )
+            if not valid_eap_password(eap_password):
+                app.console.print("[bold red]Invalid EAP password. Use 1-63 characters without quotes or line breaks.[/]")
+                return
+        else:
+            use_wpa2 = Prompt.ask("Enable WPA2-PSK security? (y/n)", choices=["y", "n"]) == "y"
+            if use_wpa2:
+                wpa_passphrase = Prompt.ask("Enter WPA2 passphrase (8-63 characters)")
+                if not _valid_wpa_passphrase(wpa_passphrase):
+                    app.console.print("[bold red]Invalid WPA2 passphrase. Use 8-63 characters without line breaks.[/]")
+                    return
 
         isolate_clients = (
             Prompt.ask("Enable client isolation (block STA-to-STA)? (y/n)", choices=["y", "n"], default="n") == "y"
@@ -247,7 +289,7 @@ def run_evil_twin_attack_impl(app) -> None:
             "Attack started",
             ssid=ssid,
             channel=channel,
-            security="WPA2" if use_wpa2 else "Open",
+            security="WPA2-EAP" if eap_mode else ("WPA2" if use_wpa2 else "Open"),
             isolation=isolate_clients,
             portal=enable_portal,
         )
@@ -255,14 +297,44 @@ def run_evil_twin_attack_impl(app) -> None:
         log_dir.mkdir(exist_ok=True)
         original_settings["evil_twin_isolate"] = isolate_clients
         original_settings["evil_twin_portal"] = enable_portal
+        original_settings["evil_twin_eap"] = eap_mode
 
-        hostapd_conf = build_hostapd_conf(
-            ap_iface=ap_iface,
-            ssid=ssid,
-            channel=channel,
-            wpa_passphrase=wpa_passphrase if use_wpa2 else None,
-            isolate_clients=isolate_clients,
-        )
+        if eap_mode:
+            if not shutil.which("openssl"):
+                app.console.print("[bold red]openssl is required to create the EAP lab certificate.[/]")
+                return
+            try:
+                material = write_eap_lab_material(
+                    log_dir / "eap",
+                    identity=eap_identity,
+                    password=eap_password,
+                )
+            except Exception as exc:
+                app.console.print(f"[bold red]Could not create EAP lab material: {exc}[/]")
+                app.logger.log_evil_twin(f"EAP lab material failed: {exc}", error=True)
+                return
+            hostapd_conf = build_eap_hostapd_conf(
+                ap_iface=ap_iface,
+                ssid=ssid,
+                channel=channel,
+                eap_user_file=material.user_file,
+                ca_cert=material.ca_cert,
+                server_cert=material.server_cert,
+                private_key=material.private_key,
+                isolate_clients=isolate_clients,
+            )
+            app.console.print(
+                f"[info]Lab EAP identity [cyan]{eap_identity}[/]. "
+                "Test STAs must trust this AP's short-lived self-signed cert (or skip validation).[/]"
+            )
+        else:
+            hostapd_conf = build_hostapd_conf(
+                ap_iface=ap_iface,
+                ssid=ssid,
+                channel=channel,
+                wpa_passphrase=wpa_passphrase if use_wpa2 else None,
+                isolate_clients=isolate_clients,
+            )
         dnsmasq_conf = build_dnsmasq_conf(
             ap_iface=ap_iface,
             log_dir=log_dir,
@@ -426,15 +498,24 @@ def run_evil_twin_attack_impl(app) -> None:
                 app.logger.log_evil_twin(f"Warning: Could not create dnsmasq.leases file: {str(exc)}")
 
             while True:
-                status_table = Table(show_header=True, header_style="bold magenta", box=box.MINIMAL, border_style=BORDER_STYLE, title="[bold blue]Evil Twin Status[/]")
-                status_table.add_column("Evil Twin SSID", style="cyan")
+                status_table = Table(
+                    show_header=True,
+                    header_style="bold magenta",
+                    box=box.MINIMAL,
+                    border_style=BORDER_STYLE,
+                    title="[bold blue]EAP lab AP[/]" if eap_mode else "[bold blue]Evil Twin Status[/]",
+                )
+                status_table.add_column("SSID", style="cyan")
                 status_table.add_column("Channel", style="green")
                 status_table.add_column("Security", style="yellow")
                 status_table.add_column("AP Status", style="magenta")
                 status_table.add_column("Running Time", style="cyan")
                 elapsed = int(time.time() - start_time)
                 time_str = f"{elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}"
-                security_str = f"WPA2-PSK ({wpa_passphrase})" if use_wpa2 else "Open"
+                if eap_mode:
+                    security_str = eap_methods_label()
+                else:
+                    security_str = f"WPA2-PSK ({wpa_passphrase})" if use_wpa2 else "Open"
                 ap_status = "[bold green]Active"
                 if hostapd_proc.poll() is not None or dnsmasq_proc.poll() is not None:
                     ap_status = "[bold red]Error"
@@ -577,10 +658,12 @@ def run_evil_twin_attack_impl(app) -> None:
                 time.sleep(1)
     except KeyboardInterrupt:
         app.logger.log_evil_twin("Attack stopped by user")
-        app.console.print("\n[bold yellow]Evil Twin attack stopped by user.[/]")
+        label = "EAP lab AP" if eap_mode else "Evil Twin attack"
+        app.console.print(f"\n[bold yellow]{label} stopped by user.[/]")
     except Exception as exc:
         app.logger.log_evil_twin(f"Error during attack: {str(exc)}", error=True)
-        app.console.print(f"\n[bold red]Error during Evil Twin attack: {str(exc)}[/]")
+        label = "EAP lab AP" if eap_mode else "Evil Twin attack"
+        app.console.print(f"\n[bold red]Error during {label}: {str(exc)}[/]")
     finally:
         app.cleanup_evil_twin(original_settings, log_dir)
         app.current_menu = "attack"

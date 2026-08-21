@@ -34,6 +34,7 @@ def run_tools_menu(app) -> None:
                 ("18", "Network hopper"),
                 ("19", "Generate HTML session report"),
                 ("20", "Probe SSIDs (client PNL)"),
+                ("21", "Session browser"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -60,6 +61,7 @@ def run_tools_menu(app) -> None:
             "18": app.network_hopper,
             "19": app.generate_session_report,
             "20": app.probe_ssid_table,
+            "21": app.session_browser,
         }
         if choice == "0":
             return

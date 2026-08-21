@@ -10,14 +10,13 @@ from typing import Callable, Optional, Sequence
 PORTAL_IP = "192.168.1.1"
 
 
-def build_hostapd_conf(
+def hostapd_radio_lines(
     *,
     ap_iface: str,
     ssid: str,
     channel: int,
-    wpa_passphrase: Optional[str] = None,
     isolate_clients: bool = False,
-) -> str:
+) -> list[str]:
     lines = [
         f"interface={ap_iface}",
         "driver=nl80211",
@@ -33,6 +32,23 @@ def build_hostapd_conf(
     ]
     if isolate_clients:
         lines.append("ap_isolate=1")
+    return lines
+
+
+def build_hostapd_conf(
+    *,
+    ap_iface: str,
+    ssid: str,
+    channel: int,
+    wpa_passphrase: Optional[str] = None,
+    isolate_clients: bool = False,
+) -> str:
+    lines = hostapd_radio_lines(
+        ap_iface=ap_iface,
+        ssid=ssid,
+        channel=channel,
+        isolate_clients=isolate_clients,
+    )
     if wpa_passphrase:
         lines.extend(
             [

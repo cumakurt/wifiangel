@@ -229,6 +229,7 @@ def run_probe_ssid_table(app) -> None:
 def run_generate_session_report(app) -> None:
     """Write the current session HTML report from collected logs."""
     networks = dict(snapshot_networks(app))
-    path = app.logger.generate_report(networks=networks)
+    attachments = list(getattr(app, "report_attachments", []) or [])
+    path = app.logger.generate_report(networks=networks, lab_sessions=attachments or None)
     app.console.print(f"[success]HTML report written to {path}[/]")
     app.logger.info("Session HTML report generated: %s", path)

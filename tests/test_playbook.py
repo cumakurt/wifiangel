@@ -27,6 +27,7 @@ class PlaybookTests(unittest.TestCase):
         self.assertTrue(playbook.skip_psk_capture)
         self.assertTrue(playbook.skip_deauth)
         self.assertEqual(playbook.akm_label, "802.1X")
+        self.assertTrue(any("Attack 10" in item for item in playbook.findings))
 
     def test_sae_only_is_passive(self):
         playbook = recommend_assessment(

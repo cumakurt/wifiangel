@@ -49,6 +49,7 @@ All attack flows assume a **selected target** where applicable. The app asks for
 | **7** | **Evil Twin lab** | **`hostapd`** + **`dnsmasq`** fake AP. Optional **lab captive portal** (HTTP + DNS sink) and **client isolation** with a two-lease AP reachability check. SSID defaults to the selected target, otherwise the most-probed client PNL name from the last scan. |
 | **8** | **Man-in-the-Middle toolkit** | Requires **`bettercap`**: interface + gateway selection, optional **ping sweep** for targets, ARP spoof + sniff caplet, Rich **Live** dashboard (session, traffic digest, ARP clients, pattern alerts). Session logs under `logs/mitm/<timestamp>/`. |
 | **9** | **Hashcat job manager** | Queue dictionary, **rules** (`-r`), or **mask** (`-a 3`) jobs against `.22000` hashes; list status and show `--restore` argv. Same store as Tools → Technical intelligence. |
+| **10** | **EAP lab AP** | Local **WPA-EAP** access point via **`hostapd` `eap_server`** (PEAP/TTLS, operator-chosen lab identity). Self-signed cert; **not** an external RADIUS relay. Same dual-radio / DHCP / optional portal path as the PSK Evil Twin lab. |
 
 ### Tools menu
 
@@ -72,8 +73,9 @@ All attack flows assume a **selected target** where applicable. The app asks for
 | **16** | **Channel Hopper Optimizer** | Adaptive per-channel dwell and hop-interval optimization based on live network/client pressure. |
 | **17** | **Technical intelligence** | PMF/WPA3 tables, artifact index, hashcat job manager, adapter capabilities. |
 | **18** | **Network hopper** | Dwell on each discovered AP channel in turn. |
-| **19** | **Generate HTML session report** | Write the current session log tree to HTML, including the assessment playbook. |
+| **19** | **Generate HTML session report** | Write the current session log tree to HTML, including the assessment playbook and any sessions attached from Tools 21. |
 | **20** | **Probe SSIDs (client PNL)** | Rank SSIDs from airodump-ng **Probed ESSIDs**, including unassociated stations. The top usable name is the Evil Twin default when no broadcast target SSID is selected. |
+| **21** | **Session browser** | Browse `handshake/`, `auto_hack_sessions/`, `logs/mitm/`, and hashcat jobs. Re-validate artifacts, queue a dictionary hashcat job, or attach rows to the Tools 19 HTML report. |
 
 ### Automated assessment workflow
 
@@ -115,7 +117,7 @@ pip install -r requirements.txt
 | Area | Typical packages (Debian/Ubuntu) |
 |------|----------------------------------|
 | Core Wi‑Fi / crack | `aircrack-ng`, `hashcat`, `hcxdumptool`, `hcxtools` (`hcxpcapngtool`) |
-| Evil Twin | `hostapd`, `dnsmasq`; `iptables`, `iproute2` |
+| Evil Twin / EAP lab AP | `hostapd`, `dnsmasq`, `openssl`; `iptables`, `iproute2` |
 | WPS | `reaver` |
 | MITM | `bettercap` |
 | Optional helpers | `curl`, `nmcli`, `macchanger`, `net-tools` (`ifconfig`), `wpaclean` |
@@ -124,7 +126,7 @@ Example:
 
 ```bash
 sudo apt update
-sudo apt install -y aircrack-ng hashcat hcxdumptool hcxtools hostapd dnsmasq macchanger reaver curl iproute2 iptables
+sudo apt install -y aircrack-ng hashcat hcxdumptool hcxtools hostapd dnsmasq openssl macchanger reaver curl iproute2 iptables
 # Optional
 sudo apt install -y bettercap network-manager
 ```
@@ -200,7 +202,7 @@ _Controller entrypoint for stateful workflow orchestration: interface bootstrap,
 ### Attack techniques
 
 ![Attack techniques](images/Attack_techniques.png)
-_Offensive workflow dispatcher for handshake/PMKID acquisition pipelines, targeted/broadcast deauth primitives, WPS routines, Evil Twin lab provisioning (`hostapd`/`dnsmasq`/NAT), and bettercap-driven MITM telemetry sessions._
+_Offensive workflow dispatcher for handshake/PMKID acquisition pipelines, targeted/broadcast deauth primitives, WPS routines, Evil Twin / EAP lab AP provisioning (`hostapd`/`dnsmasq`/NAT), and bettercap-driven MITM telemetry sessions._
 
 ### Tools menu
 
@@ -219,6 +221,7 @@ _Diagnostic and post-capture analysis surface: RF channel interference modeling,
 | `tmp/` | Temporary **`airodump-ng`** prefixes and scratch files |
 | `auto_hack_sessions/` | Timestamped automated assessment outputs and reports |
 | `logs/mitm/` | Bettercap-centric MITM session folders |
+| `tmp/hashcat_jobs.json` | Hashcat job queue used by Attacks 9 and Tools 21 |
 
 ---
 

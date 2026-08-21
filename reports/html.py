@@ -14,6 +14,7 @@ def generate_security_report(
     log_dir: Path,
     timestamp: str,
     networks: Optional[dict[str, dict]] = None,
+    lab_sessions: Optional[list[dict[str, Any]]] = None,
 ) -> Path:
     report_file = log_dir / f"report_{timestamp}.html"
 
@@ -22,6 +23,7 @@ def generate_security_report(
     network_logs = _read_lines(log_dir / "networks.log")
     client_logs = _read_lines(log_dir / "clients.log")
     playbook_section = _playbook_section(networks)
+    sessions_section = _lab_sessions_section(lab_sessions)
 
     html_content = f"""<html>
 <head>
@@ -40,6 +42,7 @@ def generate_security_report(
     <p>Report generated on: {escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</p>
 
     {playbook_section}
+    {sessions_section}
     {_section("Attack Summary", ("Timestamp", "Attack Type", "Details"), attack_logs)}
     {_section("Network Activity", ("Timestamp", "Network", "Activity"), network_logs)}
     {_section("Client Connections", ("Timestamp", "Client", "Activity"), client_logs)}
@@ -117,6 +120,30 @@ def _playbook_section(networks: Optional[dict[str, dict[str, Any]]]) -> str:
     header_html = "".join(f"<th>{escape(header)}</th>" for header in headers)
     return f"""<div class="section">
     <h2>Assessment playbook</h2>
+    <table>
+        <tr>{header_html}</tr>
+        {''.join(rows)}
+    </table>
+</div>"""
+
+
+def _lab_sessions_section(lab_sessions: Optional[list[dict[str, Any]]]) -> str:
+    if not lab_sessions:
+        return ""
+    rows = []
+    for item in lab_sessions:
+        rows.append(
+            "<tr>"
+            + "".join(
+                f"<td>{escape(str(item.get(key) or ''))}</td>"
+                for key in ("kind", "label", "path", "status", "hash_file", "detail")
+            )
+            + "</tr>"
+        )
+    headers = ("Kind", "Label", "Path", "Status", "Hash file", "Detail")
+    header_html = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    return f"""<div class="section">
+    <h2>Lab sessions</h2>
     <table>
         <tr>{header_html}</tr>
         {''.join(rows)}

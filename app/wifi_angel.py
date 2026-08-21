@@ -41,6 +41,7 @@ from app.services.attacks.deauth_service import (
 )
 from app.services.attacks.evil_twin_service import (
     cleanup_evil_twin as svc_cleanup_evil_twin,
+    run_eap_lab_ap as svc_run_eap_lab_ap,
     run_evil_twin_attack as svc_run_evil_twin_attack,
     run_evil_twin_attack_impl as svc_run_evil_twin_attack_impl,
     verify_network_services as svc_verify_network_services,
@@ -103,6 +104,7 @@ from app.services.tools.analysis_service import (
 )
 from app.services.tools.hidden_ssid_service import run_hidden_ssid_discovery as svc_run_hidden_ssid_discovery
 from app.services.tools.speed_test_service import run_speed_test as svc_run_speed_test
+from app.services.tools.session_browser import run_session_browser as svc_run_session_browser
 from app.services.tools.technical_service import (
     run_capture_health_checker as svc_run_capture_health_checker,
     run_channel_hopper_optimizer as svc_run_channel_hopper_optimizer,
@@ -141,6 +143,7 @@ class WiFiAngel:
         self.interface_name = None
         self.ap_interface = None
         self.selected_network = None
+        self.report_attachments: list[dict[str, str]] = []
         self.scanning = False
         self.current_menu = "main"
         self._suppress_live_updates = False
@@ -339,6 +342,9 @@ class WiFiAngel:
     def evil_twin_attack(self):
         svc_run_evil_twin_attack(self)
 
+    def eap_lab_ap(self):
+        svc_run_eap_lab_ap(self)
+
     def _evil_twin_attack_impl(self):
         return svc_run_evil_twin_attack_impl(self)
 
@@ -412,6 +418,9 @@ class WiFiAngel:
 
     def generate_session_report(self):
         return svc_run_generate_session_report(self)
+
+    def session_browser(self):
+        return svc_run_session_browser(self)
 
     def probe_ssid_table(self):
         return svc_run_probe_ssid_table(self)

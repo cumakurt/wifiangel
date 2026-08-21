@@ -34,6 +34,7 @@ def run_attack_menu(app) -> None:
                 ("7", "Evil twin lab"),
                 ("8", "Man-in-the-middle toolkit"),
                 ("9", "Hashcat job manager"),
+                ("10", "EAP lab AP (hostapd)"),
                 ("0", "Back to main menu"),
             ],
         )
@@ -49,6 +50,7 @@ def run_attack_menu(app) -> None:
             "7": app.evil_twin_attack,
             "8": app.mitm_attack,
             "9": lambda: run_hashcat_job_manager(app),
+            "10": app.eap_lab_ap,
         }
         if choice == "0":
             app.current_menu = "main"

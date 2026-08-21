@@ -25,6 +25,6 @@ def test_wifi_angel_session_binaries_subset_of_required_tools():
 def test_lab_tools_are_optional_not_required():
     from config.defaults import OPTIONAL_SYSTEM_TOOLS, REQUIRED_SYSTEM_TOOLS
 
-    for package in ("hostapd", "dnsmasq", "macchanger", "reaver"):
+    for package in ("hostapd", "dnsmasq", "openssl", "macchanger", "reaver"):
         assert package not in REQUIRED_SYSTEM_TOOLS
         assert package in OPTIONAL_SYSTEM_TOOLS
